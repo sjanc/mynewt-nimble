@@ -2331,6 +2331,14 @@ ble_ll_conn_created(struct ble_ll_conn_sm *connsm, struct ble_mbuf_hdr *rxhdr)
 #endif
         if (connsm->conn_role == BLE_LL_CONN_ROLE_SLAVE) {
             ble_ll_adv_send_conn_comp_ev(connsm, rxhdr);
+
+#if MYNEWT_VAL(BLE_LL_CFG_FEAT_LL_PERIODIC_ADV_SYNC_TRANSFER)
+            /* TODO
+             * This is temporary solution until clarified if host or LL should
+             * be responsible for this...
+             */
+            ble_ll_ctrl_proc_start(connsm, BLE_LL_CTRL_PROC_FEATURE_XCHG);
+#endif
         } else {
             evbuf = ble_ll_init_get_conn_comp_ev();
             ble_ll_conn_comp_event_send(connsm, BLE_ERR_SUCCESS, evbuf, NULL);
