@@ -1841,7 +1841,7 @@ ble_ll_sync_periodic_ind(struct ble_ll_conn_sm *connsm,
     int last_pa_diff;
     uint32_t sync_anchor;
     const uint8_t *addr;
-    uint16_t event_cntr;
+    uint16_t pa_event_cntr;
     uint32_t itvl_usecs;
     uint32_t ww_adjust;
     uint8_t addr_type;
@@ -1862,10 +1862,10 @@ ble_ll_sync_periodic_ind(struct ble_ll_conn_sm *connsm,
     }
 
     last_pa_event_count = get_le16(sync_ind + 22);
-    event_cntr = get_le16(syncinfo + 16);
+    pa_event_cntr = get_le16(syncinfo + 16);
     itvl_usecs = itvl * BLE_LL_SYNC_ITVL_USECS;
 
-    last_pa_diff = abs((int16_t)(event_cntr - last_pa_event_count));
+    last_pa_diff = abs((int16_t)(pa_event_cntr - last_pa_event_count));
     /* check if not 5 seconds apart, if so ignore sync transfer */
     if ((last_pa_diff * itvl_usecs) > 5000000) {
         return;
@@ -1966,7 +1966,7 @@ ble_ll_sync_periodic_ind(struct ble_ll_conn_sm *connsm,
     sm->crcinit |= syncinfo[15] << 16;
 
     /* Event Counter (2 bytes) */
-    sm->event_cntr = event_cntr;
+    sm->event_cntr = pa_event_cntr;
 
     /* adjust skip if pass timeout */
     max_skip = get_max_skip(sm->itvl * BLE_LL_SYNC_ITVL_USECS, sync_timeout);
@@ -1981,17 +1981,17 @@ ble_ll_sync_periodic_ind(struct ble_ll_conn_sm *connsm,
                                            sm->num_used_chans, sm->chanmap);
 
     /* get anchor for specified conn event */
-    conn_event_count = get_le16(sync_ind + 20);
-    ble_ll_conn_get_anchor(connsm, conn_event_count, &sm->anchor_point,
+    sync_conn_event_count = get_le16(sync_ind + 32);
+    ble_ll_conn_get_anchor(connsm, sync_conn_event_count, &sm->anchor_point,
                            &sm->anchor_point_usecs);
 
     /* Set last anchor point */
     sm->last_anchor_point = sm->anchor_point - (last_pa_diff * sm->itvl_ticks);
 
     /* calculate extra window widening */
-    sync_conn_event_count = get_le16(sync_ind + 32);
+    conn_event_count = get_le16(sync_ind + 20);
     sca = sync_ind[24] >> 5;
-    ble_ll_conn_get_anchor(connsm, sync_conn_event_count, &sync_anchor,
+    ble_ll_conn_get_anchor(connsm, conn_event_count, &sync_anchor,
                            &sync_anchor_usecs);
     ww_adjust = ble_ll_utils_calc_window_widening(connsm->anchor_point,
                                                   sync_anchor, sca);

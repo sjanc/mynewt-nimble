@@ -2277,12 +2277,14 @@ ble_ll_conn_get_anchor(struct ble_ll_conn_sm *connsm, uint16_t conn_event,
     *anchor = connsm->anchor_point;
     *anchor_usecs = connsm->anchor_point_usecs;
 
-    if ((int16_t)(conn_event - connsm->event_cntr) < 0) {
-        itvl *= connsm->event_cntr - conn_event;
-        ble_ll_tmr_sub(anchor, anchor_usecs, itvl);
-    } else {
-        itvl *= conn_event - connsm->event_cntr;
-        ble_ll_tmr_add(anchor, anchor_usecs, itvl);
+    if (conn_event != connsm->event_cntr) {
+        if ((int16_t)(conn_event - connsm->event_cntr) < 0) {
+            itvl *= connsm->event_cntr - conn_event;
+            ble_ll_tmr_sub(anchor, anchor_usecs, itvl);
+        } else {
+            itvl *= conn_event - connsm->event_cntr;
+            ble_ll_tmr_add(anchor, anchor_usecs, itvl);
+        }
     }
 }
 #endif
