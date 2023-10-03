@@ -1183,8 +1183,11 @@ struct ble_hci_vs_set_data_len_rp {
 struct ble_hci_vs_set_antenna_cp {
     uint8_t antenna;
 } __attribute__((packed));
-
-
+#define BLE_HCI_OCF_VS_SET_LOCAL_IRK                   (MYNEWT_VAL(BLE_HCI_VS_OCF_OFFSET) + (0x000A))
+struct ble_hci_vs_set_local_irk_cp {
+    uint8_t own_addr_type;
+    uint8_t irk[16];
+} __attribute__((packed));
 
 #define BLE_HCI_VS_SET_SCAN_CFG_FLAG_NO_LEGACY               (0x00000001)
 #define BLE_HCI_VS_SET_SCAN_CFG_FLAG_NO_EXT                  (0x00000002)
