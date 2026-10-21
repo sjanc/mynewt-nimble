@@ -405,15 +405,8 @@ rx_stress_5_con_update(void)
     };
 
     rc = ble_gap_update_params(rx_stress_ctx->conn_handle, &params);
-
-    if (rc == BLE_HS_ENOTCONN) {
-        MODLOG_DFLT(ERROR, "Device disconnected. Connection update failed\n");
-        assert(0);
-    }
-
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "Error during connection update; rc=%d\n", rc);
-        assert(0);
     }
 
     return rc;
@@ -442,7 +435,10 @@ rx_stress_5_gap_event(struct ble_gap_event *event, void *arg)
 
             /* Update connection. */
             rc = rx_stress_5_con_update();
-            assert(rc == 0);
+            if (rc != 0) {
+                ble_gap_terminate(rx_stress_ctx->conn_handle,
+                                  BLE_ERR_REM_USER_CONN_TERM);
+            }
         } else {
             /* Connection failed; resume advertising. */
             MODLOG_DFLT(WARN, "Connection failed; status=%d; conn handle=%d",
@@ -478,7 +474,10 @@ rx_stress_5_gap_event(struct ble_gap_event *event, void *arg)
         } else {
             /* Update connection. */
             rc = rx_stress_5_con_update();
-            assert(rc == 0);
+            if (rc != 0) {
+                ble_gap_terminate(rx_stress_ctx->conn_handle,
+                                  BLE_ERR_REM_USER_CONN_TERM);
+            }
         }
         return 0;
 
@@ -643,7 +642,10 @@ rx_stress_8_gap_event(struct ble_gap_event *event, void *arg)
 
             /* Update connection. */
             rc = rx_stress_8_con_update();
-            assert(rc == 0);
+            if (rc != 0) {
+                ble_gap_terminate(rx_stress_ctx->conn_handle,
+                                  BLE_ERR_REM_USER_CONN_TERM);
+            }
         } else {
             /* Connection failed; resume advertising. */
             MODLOG_DFLT(DEBUG, "Connection failed; status=%d ",
@@ -680,7 +682,10 @@ rx_stress_8_gap_event(struct ble_gap_event *event, void *arg)
         } else {
             /* Update connection. */
             rc = rx_stress_8_con_update();
-            assert(rc == 0);
+            if (rc != 0) {
+                ble_gap_terminate(rx_stress_ctx->conn_handle,
+                                  BLE_ERR_REM_USER_CONN_TERM);
+            }
         }
         return 0;
 
@@ -828,7 +833,9 @@ rx_stress_10_l2cap_event(struct ble_l2cap_event *event, void *arg)
 
         rc = ble_l2cap_sig_update(event->connect.conn_handle, &params,
                                   &tx_stress_10_l2cap_update_event, NULL);
-        assert(rc == 0);
+        if (rc != 0) {
+            MODLOG_DFLT(ERROR, "L2CAP params update failed; rc=%d\n", rc);
+        }
         return 0;
 
     case BLE_L2CAP_EVENT_COC_DISCONNECTED:
@@ -1614,10 +1621,14 @@ rx_stress_main_task_fn(void *arg)
     /* Wait for pressing ENTER in console */
     os_sem_pend(&rx_stress_main_sem, OS_TIMEOUT_NEVER);
 
-    /* Standard tests perform */
-    for (i = 1; i < STRESS_UUIDS_NUM; ++i) {
-        /* Start test. */
-        rx_stress_start(i);
+    if (MYNEWT_VAL(BLE_STRESS_TEST_ONLY) != 0) {
+        rx_stress_start(MYNEWT_VAL(BLE_STRESS_TEST_ONLY));
+    } else {
+        /* Standard tests perform */
+        for (i = 1; i < STRESS_UUIDS_NUM; ++i) {
+            /* Start test. */
+            rx_stress_start(i);
+        }
     }
 
     /* Print tests results */

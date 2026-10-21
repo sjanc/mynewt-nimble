@@ -592,15 +592,8 @@ tx_stress_4_con_update(void)
     };
 
     rc = ble_gap_update_params(tx_stress_ctx->conn_handle, &params);
-
-    if (rc == BLE_HS_ENOTCONN) {
-        MODLOG_DFLT(ERROR, "Device disconnected. Connection update failed\n");
-        assert(0);
-    }
-
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "Error during connection update; rc=%d\n", rc);
-        assert(0);
     }
 
     return rc;
@@ -621,7 +614,11 @@ tx_stress_4_gap_event(struct ble_gap_event *event, void *arg)
             ++tx_stress_ctx->con_stat[4].num;
             tx_stress_ctx->conn_handle = event->connect.conn_handle;
 
-            tx_stress_4_con_update();
+            rc = tx_stress_4_con_update();
+            if (rc != 0) {
+                ble_gap_terminate(tx_stress_ctx->conn_handle,
+                                  BLE_ERR_REM_USER_CONN_TERM);
+            }
         } else {
             tx_stress_on_connect_failed(tx_stress_4_gap_event, 4,
                                         event->connect.status);
@@ -1851,7 +1848,10 @@ tx_stress_main_task_fn(void *arg)
     os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
 
     /* Use case 1 does not involve RX device; perform it right away. */
-    tx_stress_test_perform(1);
+    if (MYNEWT_VAL(BLE_STRESS_TEST_ONLY) == 0 ||
+        MYNEWT_VAL(BLE_STRESS_TEST_ONLY) == 1) {
+        tx_stress_test_perform(1);
+    }
 
     while (1) {
         MODLOG_DFLT(INFO, "Start scan for test\n");

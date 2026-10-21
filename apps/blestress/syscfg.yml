@@ -27,6 +27,13 @@ syscfg.defs:
         description: Number of times to repeat each stress test use case
         value: 50
 
+    BLE_STRESS_TEST_ONLY:
+        description: If not 0, perform only this use case (1 to 15) instead
+                     of all of them. TX device follows RX device, so it is
+                     enough to set it for the RX device; set it on TX as
+                     well to skip use case 1 there.
+        value: 0
+
     BLE_STRESS_TEST_TIMEOUT:
         description: Time in seconds after which a use case that did not
                      complete is aborted and the next one is started.

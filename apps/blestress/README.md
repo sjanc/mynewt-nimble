@@ -90,9 +90,11 @@ LOG_LEVEL             1 (INFO) by default. Set to 0 to see all debug logs,
                       lost during the scan use case because of the console
                       load.
 
-To run only a selected use case, change the loop in rx_stress_main_task_fn()
-in rx_stress.c to call rx_stress_start(i) only for the wanted i. The TX
-device follows whatever the RX device advertises.
+BLE_STRESS_TEST_ONLY  If not 0, only this use case (1 to 15) is performed.
+                      The TX device follows whatever the RX device
+                      advertises, so setting it on the RX device is enough;
+                      set it on the TX device as well to skip use case 1
+                      there.
 
 Use cases
 ---------
