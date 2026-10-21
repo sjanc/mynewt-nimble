@@ -58,7 +58,8 @@ struct rx_stress_adv_set {
 /* Define task stack and task object */
 #define RX_STRESS_MAIN_TASK_STACK_SIZE (2000)
 static struct os_task rx_stress_main_task;
-static os_stack_t rx_stress_main_task_stack[RX_STRESS_MAIN_TASK_STACK_SIZE];
+/* Task stack must be aligned (8 bytes); a plain os_stack_t array is not. */
+OS_TASK_STACK_DEFINE(rx_stress_main_task_stack, RX_STRESS_MAIN_TASK_STACK_SIZE);
 static struct os_sem rx_stress_main_sem;
 
 static void
@@ -265,6 +266,7 @@ rx_stress_2_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
+        stress_conn_not_established(event, &rx_stress_ctx->con_stat[2]);
         if (rx_stress_ctx->con_stat[2].num >= MYNEWT_VAL(BLE_STRESS_REPEAT)) {
             rx_stress_on_test_finish(2);
         } else {
@@ -305,6 +307,7 @@ rx_stress_3_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
+        stress_conn_not_established(event, &rx_stress_ctx->con_stat[3]);
         if (rx_stress_ctx->con_stat[3].num >= MYNEWT_VAL(BLE_STRESS_REPEAT)) {
             rx_stress_on_test_finish(3);
         } else {
@@ -714,7 +717,8 @@ rx_stress_9_gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(INFO, "Disconnect; reason=%d; conn handle=%d\n",
-                    event->disconnect.reason, event->connect.conn_handle);
+                    event->disconnect.reason,
+                    event->disconnect.conn.conn_handle);
         MODLOG_DFLT(INFO, "Connections num: %d\n",
                     --rx_stress_ctx->con_stat[9].num);
 
@@ -756,6 +760,31 @@ tx_stress_10_l2cap_update_event(uint16_t conn_handle, int status, void *arg)
                            "handle=%d\n", status, conn_handle);
         assert(0);
     }
+}
+
+/* Number of mbufs left free for host and controller when an SDU is sent. */
+#define RX_STRESS_10_MBUF_MARGIN 8
+
+/* Checks if there are enough free mbufs to send SDU of given length. Host
+ * needs the SDU itself and a copy of it fragmented into MPS sized PDUs; each
+ * PDU is a separate chain with leading space for headers, so it takes two
+ * mbufs with the default block size. */
+static bool
+rx_stress_10_sdu_fits(int sdu_len)
+{
+    int usable;
+    int pdus;
+    int needed;
+
+    /* Each mbuf carries a bit less than block size of user data. */
+    usable = MYNEWT_VAL(MSYS_1_BLOCK_SIZE) - sizeof(struct os_mbuf) -
+             sizeof(struct os_mbuf_pkthdr);
+    pdus = (sdu_len + 2 + MYNEWT_VAL(BLE_L2CAP_COC_MPS) - 1) /
+           MYNEWT_VAL(BLE_L2CAP_COC_MPS);
+    needed = (sdu_len + usable - 1) / usable + 2 * pdus +
+             RX_STRESS_10_MBUF_MARGIN;
+
+    return needed <= os_msys_num_free();
 }
 
 static int
@@ -843,6 +872,19 @@ rx_stress_10_l2cap_event(struct ble_l2cap_event *event, void *arg)
 
     /* Send pattern data */
 
+    /* Sending an SDU needs mbufs for the SDU itself and for the L2CAP PDUs
+     * host builds from it. If host runs out of mbufs in the middle of an SDU,
+     * the SDU is dropped after some PDUs were already sent and the peer is
+     * left with an incomplete SDU, so check first whether the next SDU fits.
+     * If not (or MTU is reached), stop here; TX device ends the test on
+     * receive timeout. Max SDU size depends on MSYS_1_BLOCK_COUNT. */
+    if (data_len > STRESS_COC_MTU ||
+        !rx_stress_10_sdu_fits(data_len)) {
+        MODLOG_DFLT(INFO, "Max SDU size reached; last sent=%d; free mbufs=%d\n",
+                    data_len - 500, os_msys_num_free());
+        return 0;
+    }
+
     /* Get mbuf for adv data */
     data_buf = os_msys_get_pkthdr(data_len, 0);
 
@@ -857,11 +899,16 @@ rx_stress_10_l2cap_event(struct ble_l2cap_event *event, void *arg)
     MODLOG_DFLT(DEBUG, "Return code=%d\n", rc);
     if (rc) {
         if (rc == BLE_HS_ESTALLED) {
-            MODLOG_DFLT(ERROR, "L2CAP stalled - waiting\n");
+            MODLOG_DFLT(DEBUG, "L2CAP stalled - waiting\n");
             stalled = true;
         } else {
             MODLOG_DFLT(ERROR, "Sending data via L2CAP failed with error "
                         "code %d\n", rc);
+            /* Host takes ownership of the SDU except for these errors. */
+            if (rc == BLE_HS_EBADDATA || rc == BLE_HS_EBUSY) {
+                os_mbuf_free_chain(data_buf);
+            }
+            return 0;
         }
     }
 
@@ -932,6 +979,7 @@ rx_stress_11_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
+        stress_conn_not_established(event, &rx_stress_ctx->con_stat[11]);
         if (rx_stress_ctx->con_stat[11].num >= MYNEWT_VAL(BLE_STRESS_REPEAT)) {
             rx_stress_on_test_finish(11);
         } else {
@@ -946,10 +994,14 @@ rx_stress_11_gap_event(struct ble_gap_event *event, void *arg)
     }
 }
 
+/* Length of data notified/indicated in GATT tests. Host truncates it to
+ * ATT MTU anyway. */
+#define RX_STRESS_GATT_DATA_LEN MYNEWT_VAL(BLE_ATT_PREFERRED_MTU)
+
 static int
 rx_stress_12_gap_event(struct ble_gap_event *event, void *arg)
 {
-    int om_len = 10000;
+    int om_len = RX_STRESS_GATT_DATA_LEN;
     struct os_mbuf *om;
     int64_t us = 0;
     int rc;
@@ -975,10 +1027,18 @@ rx_stress_12_gap_event(struct ble_gap_event *event, void *arg)
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
 
-        rx_stress_ctx->s12_notif_time = rx_stress_ctx->time_sum /
-                                        rx_stress_ctx->send_num;
+        if (rx_stress_ctx->send_num < MYNEWT_VAL(BLE_STRESS_REPEAT)) {
+            /* Link dropped before test finished; let TX reconnect. */
+            rx_stress_adv_start(TEST_INSTANCE);
+            return 0;
+        }
 
-        MODLOG_DFLT(DEBUG, "Average time: %d us\n",
+        if (rx_stress_ctx->send_num > 0) {
+            rx_stress_ctx->s12_notif_time = rx_stress_ctx->time_sum /
+                                            rx_stress_ctx->send_num;
+        }
+
+        MODLOG_DFLT(INFO, "Average time: %d us\n",
                     rx_stress_ctx->s12_notif_time);
 
         rx_stress_on_test_finish(12);
@@ -992,7 +1052,15 @@ rx_stress_12_gap_event(struct ble_gap_event *event, void *arg)
             /* Send next only after previous indication is done */
             return 0;
         }
-        assert(event->notify_tx.status == BLE_HS_EDONE);
+
+        if (event->notify_tx.status != BLE_HS_EDONE) {
+            /* E.g. indication timed out; connection is in error state. */
+            MODLOG_DFLT(ERROR, "Indication failed; status=%d\n",
+                        event->notify_tx.status);
+            ble_gap_terminate(event->notify_tx.conn_handle,
+                              BLE_ERR_REM_USER_CONN_TERM);
+            return 0;
+        }
 
         if (rx_stress_ctx->send_num++ >= MYNEWT_VAL(BLE_STRESS_REPEAT)) {
             ble_gap_terminate(event->notify_tx.conn_handle,
@@ -1014,10 +1082,15 @@ rx_stress_12_gap_event(struct ble_gap_event *event, void *arg)
     /* Indicate data pattern */
     rx_stress_ctx->begin_us = os_get_uptime_usec();
     om = os_msys_get_pkthdr(om_len, 0);
+    assert(om != NULL);
     stress_fill_mbuf_with_pattern(om, om_len);
     rc = ble_gatts_indicate_custom(rx_stress_ctx->conn_handle, hrs_hrm_handle,
                                    om);
-    assert(rc == 0);
+    if (rc != 0) {
+        MODLOG_DFLT(ERROR, "Indicate failed; rc=%d\n", rc);
+        ble_gap_terminate(rx_stress_ctx->conn_handle,
+                          BLE_ERR_REM_USER_CONN_TERM);
+    }
     return 0;
 }
 
@@ -1030,10 +1103,14 @@ rx_stress_13_notify_ev_func(struct ble_npl_event *ev)
     int rc;
 
     om = ble_hs_mbuf_from_flat(test_6_pattern, 10);
+    assert(om != NULL);
     rc = ble_gatts_notify_custom(rx_stress_ctx->conn_handle,
                                  hrs_hrm_handle, om);
-    assert(rc == 0);
-
+    if (rc != 0) {
+        MODLOG_DFLT(ERROR, "Notify failed; rc=%d\n", rc);
+        ble_gap_terminate(rx_stress_ctx->conn_handle,
+                          BLE_ERR_REM_USER_CONN_TERM);
+    }
 }
 
 static int
@@ -1065,11 +1142,19 @@ rx_stress_13_gap_event(struct ble_gap_event *event, void *arg)
         MODLOG_DFLT(INFO, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
 
+        if (rx_stress_ctx->send_num < MYNEWT_VAL(BLE_STRESS_REPEAT)) {
+            /* Link dropped before test finished; let TX reconnect. */
+            rx_stress_adv_start(TEST_INSTANCE);
+            return 0;
+        }
+
         rx_stress_ctx->time_sum = rx_stress_ctx->end_us -
                                   rx_stress_ctx->begin_us;
 
-        rx_stress_ctx->s13_notif_time = rx_stress_ctx->time_sum /
-                                        rx_stress_ctx->send_num;
+        if (rx_stress_ctx->send_num > 0) {
+            rx_stress_ctx->s13_notif_time = rx_stress_ctx->time_sum /
+                                            rx_stress_ctx->send_num;
+        }
 
         MODLOG_DFLT(INFO, "Average time: %d us\n",
                     rx_stress_ctx->s13_notif_time);
@@ -1077,13 +1162,19 @@ rx_stress_13_gap_event(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_TX:
-        MODLOG_DFLT(INFO, "Notify TX event; num=%d\n",
+        MODLOG_DFLT(DEBUG, "Notify TX event; num=%d\n",
                     ++rx_stress_ctx->send_num);
-        assert(event->notify_tx.status == 0);
+        if (event->notify_tx.status != 0) {
+            MODLOG_DFLT(ERROR, "Notification failed; status=%d\n",
+                        event->notify_tx.status);
+            ble_gap_terminate(event->notify_tx.conn_handle,
+                              BLE_ERR_REM_USER_CONN_TERM);
+            return 0;
+        }
 
         if (rx_stress_ctx->send_num >= MYNEWT_VAL(BLE_STRESS_REPEAT)) {
             rx_stress_ctx->end_us = os_get_uptime_usec();
-            ble_gap_terminate(event->connect.conn_handle,
+            ble_gap_terminate(event->notify_tx.conn_handle,
                               BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
@@ -1103,8 +1194,8 @@ rx_stress_13_gap_event(struct ble_gap_event *event, void *arg)
 static int
 rx_stress_14_gap_event(struct ble_gap_event *event, void *arg)
 {
-    int bytes_num = 10000;
-    static struct os_mbuf *om = NULL;
+    int bytes_num = RX_STRESS_GATT_DATA_LEN;
+    struct os_mbuf *om;
     int rc;
 
     switch (event->type) {
@@ -1127,8 +1218,16 @@ rx_stress_14_gap_event(struct ble_gap_event *event, void *arg)
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
 
-        rx_stress_ctx->s14_notif_time = rx_stress_ctx->time_sum /
-                                        rx_stress_ctx->send_num;
+        if (rx_stress_ctx->send_num < MYNEWT_VAL(BLE_STRESS_REPEAT)) {
+            /* Link dropped before test finished; let TX reconnect. */
+            rx_stress_adv_start(TEST_INSTANCE);
+            return 0;
+        }
+
+        if (rx_stress_ctx->send_num > 0) {
+            rx_stress_ctx->s14_notif_time = rx_stress_ctx->time_sum /
+                                            rx_stress_ctx->send_num;
+        }
 
         MODLOG_DFLT(DEBUG, "Average time: %d us\n",
                     rx_stress_ctx->s14_notif_time);
@@ -1138,7 +1237,10 @@ rx_stress_14_gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_NOTIFY_TX:
         MODLOG_DFLT(DEBUG, "Notify TX event\n");
-        assert(event->notify_tx.status == 0);
+        if (event->notify_tx.status != 0) {
+            MODLOG_DFLT(ERROR, "Notification failed; status=%d\n",
+                        event->notify_tx.status);
+        }
         return 0;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
@@ -1150,11 +1252,17 @@ rx_stress_14_gap_event(struct ble_gap_event *event, void *arg)
             ++rx_stress_ctx->send_num;
 
             /* Notify data pattern */
-            om = ble_hs_mbuf_from_flat(test_6_pattern, bytes_num);
+            om = os_msys_get_pkthdr(bytes_num, 0);
+            assert(om != NULL);
+            stress_fill_mbuf_with_pattern(om, bytes_num);
 
             rc = ble_gatts_notify_custom(rx_stress_ctx->conn_handle,
                                          hrs_hrm_handle, om);
-            assert(rc == 0);
+            if (rc != 0) {
+                MODLOG_DFLT(ERROR, "Notify failed; rc=%d\n", rc);
+                ble_gap_terminate(rx_stress_ctx->conn_handle,
+                                  BLE_ERR_REM_USER_CONN_TERM);
+            }
         } else if (event->subscribe.prev_notify) {
             MODLOG_DFLT(DEBUG, "Notification unsubscribed\n");
         } else {
@@ -1189,6 +1297,7 @@ rx_stress_15_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
+        stress_conn_not_established(event, &rx_stress_ctx->con_stat[15]);
         if (rx_stress_ctx->con_stat[15].num >= MYNEWT_VAL(BLE_STRESS_REPEAT)) {
             rx_stress_on_test_finish(15);
         } else {
@@ -1448,6 +1557,15 @@ stress_uuid_init()
 static void
 rx_stress_read_command_cb(void)
 {
+    static bool started;
+
+    /* Only the first ENTER starts the tests; any later console input must
+     * not release the semaphore the tests are synchronized with. */
+    if (started) {
+        return;
+    }
+    started = true;
+
     MODLOG_DFLT(INFO, "Start testing\n");
     os_sem_release(&rx_stress_main_sem);
 }
@@ -1459,11 +1577,14 @@ rx_stress_main_task_fn(void *arg)
 
     stress_uuid_init();
 
+    /* Init semaphore with 0 tokens. */
+    os_sem_init(&rx_stress_main_sem, 0);
+
     MODLOG_DFLT(INFO, "RX device\n");
     MODLOG_DFLT(INFO, "Press ENTER to start: \n");
     console_init(&rx_stress_read_command_cb);
 
-    /* Waite for pressing ENTER in console */
+    /* Wait for pressing ENTER in console */
     os_sem_pend(&rx_stress_main_sem, OS_TIMEOUT_NEVER);
 
     /* Standard tests perform */
@@ -1477,6 +1598,8 @@ rx_stress_main_task_fn(void *arg)
 
     /* Task should never return */
     while (1) {
+        /* Delay used only to prevent watchdog to reset the device. */
+        os_time_delay(os_time_ms_to_ticks32(2000));
     }
 }
 

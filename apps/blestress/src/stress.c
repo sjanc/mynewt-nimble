@@ -29,9 +29,14 @@ com_stress_print_report(const struct com_stress_test_ctx *test_ctxs)
 
     MODLOG_DFLT(INFO, "Use case 1 - "
                       "Stress Connect -> Connect Cancel: \n");
+#if MYNEWT_VAL(BLE_STRESS_TEST_ROLE)
+    MODLOG_DFLT(INFO, "(measured on TX device)\n");
+#else
     MODLOG_DFLT(INFO, "Con attempts = %d\n",
                 test_ctxs->con_stat[1].attempts_num);
-    MODLOG_DFLT(INFO, "Con success = %d\n", test_ctxs->con_stat[1].num);
+    MODLOG_DFLT(INFO, "Con success (expected 0) = %d\n",
+                test_ctxs->con_stat[1].num);
+#endif
 
     MODLOG_DFLT(INFO, "Use case 2 - "
                       "Stress Connect/Disconnect legacy: \n");
@@ -56,10 +61,14 @@ com_stress_print_report(const struct com_stress_test_ctx *test_ctxs)
                 test_ctxs->con_stat[5].prms_upd_num);
 
     MODLOG_DFLT(INFO, "Use case 6 - Stress Scan: \n");
+#if MYNEWT_VAL(BLE_STRESS_TEST_ROLE)
+    MODLOG_DFLT(INFO, "(measured on TX device)\n");
+#else
     MODLOG_DFLT(INFO, "Received first packets = %d\n",
                 test_ctxs->s6_rcv_adv_first);
     MODLOG_DFLT(INFO, "Received all packets = %d\n",
                 test_ctxs->s6_rcv_adv_suc);
+#endif
 
     MODLOG_DFLT(INFO, "Use case 7 - "
                       "Stress PHY Update (TX): \n");
@@ -77,23 +86,45 @@ com_stress_print_report(const struct com_stress_test_ctx *test_ctxs)
                 test_ctxs->con_stat[9].max_num);
 
     MODLOG_DFLT(INFO, "Use case 10 - Stress L2CAP send: \n");
-    MODLOG_DFLT(INFO, "Average bit rate = %d\n", test_ctxs->s10_bit_rate);
-    MODLOG_DFLT(INFO, "Max received MTU = %lld\n", test_ctxs->s10_max_mtu);
+#if MYNEWT_VAL(BLE_STRESS_TEST_ROLE)
+    MODLOG_DFLT(INFO, "(measured on TX device)\n");
+#else
+    MODLOG_DFLT(INFO, "Average throughput = %d B/s\n",
+                test_ctxs->s10_bit_rate);
+    MODLOG_DFLT(INFO, "Max received SDU = %lld\n", test_ctxs->s10_max_mtu);
+#endif
 
     MODLOG_DFLT(INFO, "Use case 11 - "
-                      "Stress Advertise/Connect/Continue adv \n");
+                      "Stress Advertise/Connect/Continue adv: \n");
+    MODLOG_DFLT(INFO, "Con num = %d\n", test_ctxs->con_stat[11].num);
 
     MODLOG_DFLT(INFO, "Use case 12 - "
                       "Stress GATT indication: \n");
-    MODLOG_DFLT(INFO, "Average bit rate = %d\n", test_ctxs->s12_notif_time);
+#if MYNEWT_VAL(BLE_STRESS_TEST_ROLE)
+    MODLOG_DFLT(INFO, "Average indication time = %d us\n",
+                test_ctxs->s12_notif_time);
+#else
+    MODLOG_DFLT(INFO, "(measured on RX device)\n");
+#endif
 
     MODLOG_DFLT(INFO, "Use case 13 - "
                       "Stress GATT notification: \n");
-    MODLOG_DFLT(INFO, "Average time = %d\n", test_ctxs->s13_notif_time);
+#if MYNEWT_VAL(BLE_STRESS_TEST_ROLE)
+    MODLOG_DFLT(INFO, "Average notification time = %d us\n",
+                test_ctxs->s13_notif_time);
+#else
+    MODLOG_DFLT(INFO, "Received notifications = %d\n",
+                test_ctxs->s13_rcv_num);
+#endif
 
     MODLOG_DFLT(INFO, "Use case 14 - "
                       "Stress GATT Subscribe/Notify/Unsubscribe: \n");
-    MODLOG_DFLT(INFO, "Average time = %d\n", test_ctxs->s14_notif_time);
+#if MYNEWT_VAL(BLE_STRESS_TEST_ROLE)
+    MODLOG_DFLT(INFO, "(measured on TX device)\n");
+#else
+    MODLOG_DFLT(INFO, "Average subscribe to notification time = %d us\n",
+                test_ctxs->s14_notif_time);
+#endif
 
     MODLOG_DFLT(INFO, "Use case 15 - "
                       "Stress Connect/Send/Disconnect: \n");
@@ -104,8 +135,7 @@ void
 stress_clear_ctx_reusable_var(struct com_stress_test_ctx *ctx)
 {
     ctx->cur_test_id = 0;
-    ctx->dev_addr.type = 0;
-    ctx->dev_addr.type = 0;
+    memset(&ctx->dev_addr, 0, sizeof(ctx->dev_addr));
     ctx->conn_handle = 0;
     ctx->chan = 0;
     ctx->rcv_data_bytes = 0;
@@ -201,12 +231,38 @@ stress_start_timer(uint32_t timeout_ms, os_event_fn *ev_cb)
 int64_t
 stress_calc_bit_rate(int64_t us, int64_t bytes_num)
 {
-    int bit_rate;
+    int64_t bit_rate;
+
+    if (us == 0) {
+        return 0;
+    }
 
     /* Multiply by 1000000 so you don't lose accuracy */
     bit_rate = 1000000 * bytes_num / us;
 
     return bit_rate;
+}
+
+/*
+ * Central gets a connection complete event as soon as CONNECT_IND is sent,
+ * before the peripheral confirmed anything. If the peripheral did not receive
+ * it, the link is dropped with "connection failed to be established" and only
+ * one side counted the connection. Call from disconnect handler of tests that
+ * count connections; returns true and removes the connection from the stats
+ * if it was never established.
+ */
+bool
+stress_conn_not_established(const struct ble_gap_event *event,
+                            struct stress_con_stat *stat)
+{
+    if (event->disconnect.reason !=
+        BLE_HS_HCI_ERR(BLE_ERR_CONN_ESTABLISHMENT)) {
+        return false;
+    }
+
+    MODLOG_DFLT(WARN, "Connection failed to be established; not counted\n");
+    --stat->num;
+    return true;
 }
 
 static int
@@ -242,11 +298,15 @@ stress_disc_dsc_fn(uint16_t conn_handle,
         }
 
         MODLOG_DFLT(ERROR, "Did not find particular descriptor\n");
+        /* Let the test handle the failure (dsc_handle is 0). */
+        search_ctx->disc_end_fn(search_ctx);
         return 0;
     }
 
-    MODLOG_DFLT(ERROR, "Error during descriptor discovery\n");
-    assert(0);
+    MODLOG_DFLT(ERROR, "Error during descriptor discovery; status=%d\n",
+                error->status);
+    found = false;
+    search_ctx->disc_end_fn(search_ctx);
     return 0;
 }
 
@@ -283,16 +343,25 @@ stress_disc_chr_fn(uint16_t conn_handle,
                                          search_ctx->chr_start_handle,
                                          search_ctx->srv_end_handle,
                                          &stress_disc_dsc_fn, search_ctx);
-            assert(rc == 0);
+            if (rc != 0) {
+                MODLOG_DFLT(ERROR, "Descriptor discovery failed; rc=%d\n",
+                            rc);
+                search_ctx->dsc_handle = 0;
+                search_ctx->disc_end_fn(search_ctx);
+            }
             return 0;
         }
 
         MODLOG_DFLT(ERROR, "Did not find particular characteristic\n");
+        /* Let the test handle the failure (chr_start_handle is 0). */
+        search_ctx->disc_end_fn(search_ctx);
         return 0;
     }
 
-    MODLOG_DFLT(ERROR, "Error during characteristic discovery\n");
-    assert(0);
+    MODLOG_DFLT(ERROR, "Error during characteristic discovery; status=%d\n",
+                error->status);
+    found = false;
+    search_ctx->disc_end_fn(search_ctx);
     return 0;
 }
 
@@ -331,17 +400,25 @@ stress_disc_svc_fn(uint16_t conn_handle, const struct ble_gatt_error *error,
                                              &stress_disc_chr_fn,
                                              search_ctx);
             MODLOG_DFLT(DEBUG, "rc=%d\n", rc);
-            assert(rc == 0);
+            if (rc != 0) {
+                MODLOG_DFLT(ERROR, "Characteristic discovery failed; "
+                                   "rc=%d\n", rc);
+                search_ctx->disc_end_fn(search_ctx);
+            }
             return 0;
         }
 
         MODLOG_DFLT(ERROR,
                     "Did not find particular service\n");
+        /* Let the test handle the failure (handles are 0). */
+        search_ctx->disc_end_fn(search_ctx);
         return 0;
     }
 
-    MODLOG_DFLT(ERROR, "Error during service discovery\n");
-    assert(0);
+    MODLOG_DFLT(ERROR, "Error during service discovery; status=%d\n",
+                error->status);
+    found = false;
+    search_ctx->disc_end_fn(search_ctx);
     return 0;
 }
 
@@ -367,7 +444,10 @@ stress_gatt_find_handle(uint16_t conn_handle, const ble_uuid_t *srv_uuid,
 
     rc = ble_gattc_disc_svc_by_uuid(conn_handle, srv_uuid, &stress_disc_svc_fn,
                                     &search_ctx);
-    assert(rc == 0);
+    if (rc != 0) {
+        MODLOG_DFLT(ERROR, "Service discovery failed; rc=%d\n", rc);
+        disc_end_fn(&search_ctx);
+    }
 }
 
 void

@@ -171,6 +171,9 @@ struct com_stress_test_ctx {
     /* Average notification time */
     int s14_notif_time;
 
+    /* Number of notifications received by TX device */
+    int s13_rcv_num;
+
     /* Max size of received MTU */
     int64_t s10_max_mtu;
 };
@@ -359,6 +362,9 @@ void stress_l2cap_coc_accept(uint16_t peer_mtu, struct ble_l2cap_chan *chan);
 void stress_start_timer(uint32_t timeout_ms, os_event_fn *ev_cb);
 
 int64_t stress_calc_bit_rate(int64_t us, int64_t bytes_num);
+
+bool stress_conn_not_established(const struct ble_gap_event *event,
+                                 struct stress_con_stat *stat);
 
 void stress_find_svc_handle(uint16_t conn_handle, const ble_uuid_t *srv_uuid,
                             stress_gatt_disc_end_fn *disc_end_fn);

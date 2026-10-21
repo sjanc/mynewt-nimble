@@ -65,10 +65,17 @@ syscfg.vals:
 
     # Controller uses msys pool for storing advertising data and scan responses.
     # Since we advertise a lot of data (~4k in total) at the same time we need
-    # to increase block count.
-    MSYS_1_BLOCK_COUNT: 50
+    # to increase block count. The pool also limits the largest L2CAP SDU the
+    # RX device can send in use case 10 (an SDU needs about twice its size in
+    # mbufs), so increase it further if more RAM is available.
+    MSYS_1_BLOCK_COUNT: 120
 
-    #
+    # Tests connect/disconnect in quick succession; with the default number
+    # of HCI event buffers controller runs out of them and drops events (e.g.
+    # Disconnection Complete), so the host misses connections.
+    BLE_TRANSPORT_EVT_COUNT: 16
+    BLE_TRANSPORT_EVT_DISCARDABLE_COUNT: 32
+
     BLE_L2CAP_COC_MAX_NUM: 2
 
     # L2CAP COC SDU buffers in RX endpoint

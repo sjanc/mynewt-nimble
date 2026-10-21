@@ -38,13 +38,22 @@ static struct com_stress_test_ctx tx_stress_ctxD = {
 static struct com_stress_test_ctx *tx_stress_ctx;
 
 /* Define stack, object and semaphore for test main task. */
-#define TX_STRESS_MAIN_TASK_STACK_SIZE (500)
+#define TX_STRESS_MAIN_TASK_STACK_SIZE (2000)
 static struct os_task tx_stress_main_task;
-static os_stack_t tx_stress_main_task_stack[TX_STRESS_MAIN_TASK_STACK_SIZE];
+/* Task stack must be aligned (8 bytes); a plain os_stack_t array is not. */
+OS_TASK_STACK_DEFINE(tx_stress_main_task_stack, TX_STRESS_MAIN_TASK_STACK_SIZE);
 static struct os_sem tx_stress_main_sem;
 /* Test use case and address of test advertiser. */
 static int tx_stress_use_case;
 static int completed_tests = 0;
+
+/* Number of times a failed connection attempt (or scan for the test
+ * advertiser) is retried before the current test is given up. */
+#define TX_STRESS_RETRIES 3
+static int tx_stress_retries;
+
+/* Semaphore used by test 1 to wait for the result of each connect/cancel. */
+static struct os_sem tx_stress_1_sem;
 
 static void
 tx_stress_on_test_finish(int test_num)
@@ -114,6 +123,65 @@ tx_stress_simple_connect(ble_gap_event_fn *cb, int test_num, struct ble_gap_conn
     }
 
     return rc;
+}
+
+/*
+ * Called when a connection attempt of the current test failed. Retries the
+ * connection a few times and then gives the test up, so that the main task
+ * does not wait forever for a test that cannot proceed (e.g. RX device out
+ * of range).
+ */
+static void
+tx_stress_on_connect_failed(ble_gap_event_fn *cb, int test_num, int status)
+{
+    int rc;
+
+    MODLOG_DFLT(ERROR, "Error: connection attempt failed; test=%d; "
+                       "status=%d; retry=%d\n",
+                test_num, status, tx_stress_retries);
+
+    if (tx_stress_retries++ < TX_STRESS_RETRIES) {
+        rc = tx_stress_simple_connect(cb, test_num, NULL);
+        if (rc == 0) {
+            return;
+        }
+    }
+
+    MODLOG_DFLT(ERROR, "Giving up test %d\n", test_num);
+    tx_stress_on_test_finish(test_num);
+}
+
+/* Reconnect to the RX device within the current test. */
+static void
+tx_stress_reconnect(ble_gap_event_fn *cb, int test_num)
+{
+    int rc;
+
+    rc = tx_stress_simple_connect(cb, test_num, NULL);
+    if (rc != 0) {
+        tx_stress_on_connect_failed(cb, test_num, rc);
+    }
+}
+
+/*
+ * Called from disconnect handler of tests performed within one connection.
+ * If the test did not reach its goal yet (e.g. link dropped), reconnect a
+ * few times, otherwise finish the test.
+ */
+static void
+tx_stress_on_disconnect(ble_gap_event_fn *cb, int test_num, int count)
+{
+    if (count < MYNEWT_VAL(BLE_STRESS_REPEAT) &&
+        tx_stress_retries < TX_STRESS_RETRIES) {
+        MODLOG_DFLT(WARN, "Disconnected before test %d finished (%d/%d); "
+                          "reconnecting\n", test_num, count,
+                    MYNEWT_VAL(BLE_STRESS_REPEAT));
+        tx_stress_retries++;
+        tx_stress_reconnect(cb, test_num);
+        return;
+    }
+
+    tx_stress_on_test_finish(test_num);
 }
 
 static int
@@ -222,27 +290,49 @@ tx_stress_1_gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         /* A new connection was established or a connection attempt failed. */
-        MODLOG_DFLT(INFO, "Connection %s; status=%d ",
+        MODLOG_DFLT(DEBUG, "Connection %s; status=%d\n",
                     event->connect.status == 0 ? "established" : "failed",
                     event->connect.status);
 
         if (event->connect.status == 0) {
             /* Connection successfully established. In this use case
              * it is error of 'Connect cancel'. Stress test failed. */
-            MODLOG_DFLT(DEBUG, "Success to connect to device\n");
+            MODLOG_DFLT(ERROR, "Unexpected connection to random address\n");
             ++tx_stress_ctx->con_stat[1].num;
 
+            /* Next attempt is started after disconnection. */
             ble_gap_terminate(event->connect.conn_handle, BLE_ERR_NO_PAIRING);
+            return 0;
         }
+
+        /* Cancel is complete, the next attempt can be started. */
+        os_sem_release(&tx_stress_1_sem);
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d ", event->disconnect.reason);
+        os_sem_release(&tx_stress_1_sem);
         return 0;
 
     default:
         MODLOG_DFLT(INFO, "Other event occurs=%d\n", event->type);
         return 0;
+    }
+}
+
+/*
+ * Wait until the controller reports the result of the cancelled connection
+ * attempt. Host refuses a new connection attempt (BLE_HS_EALREADY) until
+ * then.
+ */
+static void
+tx_stress_1_wait_cancel(void)
+{
+    os_error_t err;
+
+    err = os_sem_pend(&tx_stress_1_sem, os_time_ms_to_ticks32(12000));
+    if (err != OS_OK) {
+        MODLOG_DFLT(ERROR, "Timeout waiting for connect cancel\n");
     }
 }
 
@@ -256,6 +346,8 @@ tx_stress_1_test()
 
     rc = ble_gap_disc_active();
     assert(rc == 0);
+
+    os_sem_init(&tx_stress_1_sem, 0);
 
     /* Figure out address to use while advertising. */
     rc = ble_hs_id_infer_auto(0, &own_addr_type);
@@ -280,12 +372,13 @@ tx_stress_1_test()
         if (rc != 0) {
             MODLOG_DFLT(ERROR, "Connection error; rc=%d\n",
                         rc);
-            os_sem_release(&tx_stress_main_sem);
+            tx_stress_on_test_finish(1);
             return;
         }
 
         MODLOG_DFLT(DEBUG, "Connect cancel\n");
         ble_gap_conn_cancel();
+        tx_stress_1_wait_cancel();
     }
 
     MODLOG_DFLT(INFO, "\nFirst part of test completed\nStart second part: "
@@ -302,7 +395,7 @@ tx_stress_1_test()
 
         delay_time = rand() % 1000;
 
-        MODLOG_DFLT(INFO, "Time to delay=%d\n", delay_time);
+        MODLOG_DFLT(DEBUG, "Time to delay=%d\n", delay_time);
 
         rc = ble_gap_connect(own_addr_type, &rnd_rx_addr, 10000, NULL,
                              tx_stress_1_gap_event, NULL);
@@ -310,7 +403,7 @@ tx_stress_1_test()
         if (rc != 0) {
             MODLOG_DFLT(ERROR, "Connection error; rc=%d\n",
                         rc);
-            os_sem_release(&tx_stress_main_sem);
+            tx_stress_on_test_finish(1);
             return;
         }
 
@@ -318,6 +411,7 @@ tx_stress_1_test()
 
         MODLOG_DFLT(DEBUG, "Connect cancel\n");
         ble_gap_conn_cancel();
+        tx_stress_1_wait_cancel();
     }
 
     tx_stress_on_test_finish(1);
@@ -349,24 +443,21 @@ tx_stress_2_gap_event(struct ble_gap_event *event, void *arg)
             MODLOG_DFLT(INFO, "Connection terminated; conn handle=%d, rc=%d\n",
                         event->connect.conn_handle, rc);
         } else {
-            MODLOG_DFLT(ERROR, "Error: connection attempt failed; "
-                               "status=%d; conn handle=%d;\n",
-                               event->connect.status,
-                               event->connect.conn_handle);
-            os_sem_release(&tx_stress_main_sem);
+            tx_stress_on_connect_failed(tx_stress_2_gap_event, 2,
+                                        event->connect.status);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
+        stress_conn_not_established(event, &tx_stress_ctx->con_stat[2]);
 
         if (tx_stress_ctx->con_stat[2].num >= MYNEWT_VAL(BLE_STRESS_REPEAT)) {
             tx_stress_on_test_finish(2);
             return 0;
         }
-        tx_stress_simple_connect(tx_stress_2_gap_event,
-                                 tx_stress_ctx->cur_test_id, NULL);
+        tx_stress_reconnect(tx_stress_2_gap_event, 2);
         return 0;
 
     default:
@@ -393,22 +484,21 @@ tx_stress_3_gap_event(struct ble_gap_event *event, void *arg)
 
             MODLOG_DFLT(DEBUG, "rc=%d\n", rc);
         } else {
-            MODLOG_DFLT(ERROR, "Error: connection attempt failed; "
-                               "status=%d\n", event->connect.status);
-            os_sem_release(&tx_stress_main_sem);
+            tx_stress_on_connect_failed(tx_stress_3_gap_event, 3,
+                                        event->connect.status);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
+        stress_conn_not_established(event, &tx_stress_ctx->con_stat[3]);
 
         if (tx_stress_ctx->con_stat[3].num >= MYNEWT_VAL(BLE_STRESS_REPEAT)) {
             tx_stress_on_test_finish(3);
             return 0;
         }
-        tx_stress_simple_connect(tx_stress_3_gap_event,
-                                 tx_stress_ctx->cur_test_id, NULL);
+        tx_stress_reconnect(tx_stress_3_gap_event, 3);
         return 0;
 
     default:
@@ -470,16 +560,16 @@ tx_stress_4_gap_event(struct ble_gap_event *event, void *arg)
 
             tx_stress_4_con_update();
         } else {
-            MODLOG_DFLT(ERROR, "Error: connection attempt failed; "
-                               "status=%d\n", event->connect.status);
-            os_sem_release(&tx_stress_main_sem);
+            tx_stress_on_connect_failed(tx_stress_4_gap_event, 4,
+                                        event->connect.status);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
-        tx_stress_on_test_finish(4);
+        tx_stress_on_disconnect(tx_stress_4_gap_event, 4,
+                                tx_stress_ctx->con_stat[4].prms_upd_num);
         return 0;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
@@ -500,7 +590,8 @@ tx_stress_4_gap_event(struct ble_gap_event *event, void *arg)
 
             if (rc != 0) {
                 MODLOG_DFLT(ERROR, "Error: update fail; rc=%d\n", rc);
-                os_sem_release(&tx_stress_main_sem);
+                ble_gap_terminate(tx_stress_ctx->conn_handle,
+                                  BLE_ERR_REM_USER_CONN_TERM);
             }
         }
         return 0;
@@ -527,16 +618,16 @@ tx_stress_5_gap_event(struct ble_gap_event *event, void *arg)
             ++tx_stress_ctx->con_stat[5].num;
             tx_stress_ctx->conn_handle = event->connect.conn_handle;
         } else {
-            MODLOG_DFLT(ERROR, "Error: Update fail; status=%d\n",
-                        event->connect.status);
-            os_sem_release(&tx_stress_main_sem);
+            tx_stress_on_connect_failed(tx_stress_5_gap_event, 5,
+                                        event->connect.status);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
-        tx_stress_on_test_finish(5);
+        tx_stress_on_disconnect(tx_stress_5_gap_event, 5,
+                                tx_stress_ctx->con_stat[5].prms_upd_num);
         return 0;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
@@ -735,16 +826,16 @@ tx_stress_7_gap_event(struct ble_gap_event *event, void *arg)
 
             tx_stress_7_phy_update();
         } else {
-            MODLOG_DFLT(ERROR, "Error: Update fail; "
-                               "status=%d\n", event->connect.status);
-            os_sem_release(&tx_stress_main_sem);
+            tx_stress_on_connect_failed(tx_stress_7_gap_event, 7,
+                                        event->connect.status);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
-        tx_stress_on_test_finish(7);
+        tx_stress_on_disconnect(tx_stress_7_gap_event, 7,
+                                tx_stress_ctx->con_stat[7].phy_upd_num);
         return 0;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
@@ -772,10 +863,9 @@ tx_stress_7_gap_event(struct ble_gap_event *event, void *arg)
             /* Update connection. */
             rc = tx_stress_7_phy_update();
             if (rc != 0) {
-                MODLOG_DFLT(ERROR, "Error: PHPY update fail; "
-                                   "rc=%d\n",
-                                   event->phy_updated.status);
-                assert(0);
+                MODLOG_DFLT(ERROR, "Error: PHY update fail; rc=%d\n", rc);
+                ble_gap_terminate(tx_stress_ctx->conn_handle,
+                                  BLE_ERR_REM_USER_CONN_TERM);
             }
         }
         return 0;
@@ -798,16 +888,16 @@ tx_stress_8_gap_event(struct ble_gap_event *event, void *arg)
             ++tx_stress_ctx->con_stat[8].num;
             tx_stress_ctx->conn_handle = event->connect.conn_handle;
         } else {
-            MODLOG_DFLT(ERROR, "Error: connection attempt failed; "
-                               "status=%d\n", event->connect.status);
-            os_sem_release(&tx_stress_main_sem);
+            tx_stress_on_connect_failed(tx_stress_8_gap_event, 8,
+                                        event->connect.status);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
-        tx_stress_on_test_finish(8);
+        tx_stress_on_disconnect(tx_stress_8_gap_event, 8,
+                                tx_stress_ctx->con_stat[8].phy_upd_num);
         return 0;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
@@ -905,7 +995,8 @@ tx_stress_9_gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d; conn handle=%d",
-                    event->disconnect.reason);
+                    event->disconnect.reason,
+                    event->disconnect.conn.conn_handle);
         MODLOG_DFLT(INFO, "Connections num: %d\n",
                     --tx_stress_ctx->con_stat[9].num);
 
@@ -954,16 +1045,20 @@ tx_stress_9_perform()
 
     os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
 
-    /* On use case finishing terminate all handled connections */
-    for (i = 0; i <= MYNEWT_VAL(BLE_MAX_CONNECTIONS); ++i) {
-        rc = ble_gap_conn_find(i, NULL);
-        if (rc == 0) {
-            MODLOG_DFLT(DEBUG, "Terminating...\n");
-            ble_gap_terminate(i, BLE_ERR_REM_USER_CONN_TERM);
+    /* On use case finishing terminate all handled connections and wait
+     * until the last one is gone. */
+    if (tx_stress_ctx->con_stat[9].num > 0) {
+        for (i = 0; i <= MYNEWT_VAL(BLE_MAX_CONNECTIONS); ++i) {
+            rc = ble_gap_conn_find(i, NULL);
+            if (rc == 0) {
+                MODLOG_DFLT(DEBUG, "Terminating...\n");
+                ble_gap_terminate(i, BLE_ERR_REM_USER_CONN_TERM);
+            }
         }
+
+        os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
     }
 
-    os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
     tx_stress_on_test_finish(9);
 }
 
@@ -976,7 +1071,7 @@ tx_stress_10_l2cap_send(struct ble_l2cap_chan *chan, uint8_t *data,
 
     /* Get mbuf for adv data */
     data_buf = os_msys_get_pkthdr(data_len, 0);
-    assert(data != NULL);
+    assert(data_buf != NULL);
 
     /* Fill mbuf with pattern data */
     rc = os_mbuf_append(data_buf, data, data_len);
@@ -1143,14 +1238,15 @@ tx_stress_10_gap_event(struct ble_gap_event *event, void *arg)
                                    tx_stress_10_l2cap_event, NULL);
             assert(rc == 0);
         } else {
-            MODLOG_DFLT(ERROR, "Error: connection attempt failed; "
-                               "status=%d\n", event->connect.status);
+            tx_stress_on_connect_failed(tx_stress_10_gap_event, 10,
+                                        event->connect.status);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
-        tx_stress_ctx->s10_bit_rate = 1000000 * tx_stress_ctx->bytes_sum /
-                                      tx_stress_ctx->time_sum;
+        tx_stress_ctx->s10_bit_rate =
+            stress_calc_bit_rate(tx_stress_ctx->time_sum,
+                                 tx_stress_ctx->bytes_sum);
 
         MODLOG_DFLT(DEBUG, "Average bit rate: %d B/s\n",
                     tx_stress_ctx->s10_bit_rate);
@@ -1170,19 +1266,33 @@ tx_stress_11_gap_event(struct ble_gap_event *event, void *arg)
 
     switch (event->type) {
     case BLE_GAP_EVENT_EXT_DISC:
-        /* Looking for next instance of test 9 advert. */
+        /* Looking for next instance of test 11 advert. */
         test = tx_stress_find_test(&event->ext_disc);
 
-        /* To avoid messing by rest of test 9 events in queue, check if handle
+        /* To avoid messing by rest of test 11 events in queue, check if handle
          * filled */
         if (test == 11 && tx_stress_ctx->conn_handle == 0xffff) {
             tx_stress_ctx->conn_handle = 0;
             ble_gap_disc_cancel();
             tx_stress_ctx->dev_addr = event->ext_disc.addr;
-            tx_stress_simple_connect(tx_stress_11_gap_event,
-                                     tx_stress_ctx->cur_test_id, NULL);
+            tx_stress_reconnect(tx_stress_11_gap_event, 11);
         }
         return 0;
+
+    case BLE_GAP_EVENT_DISC_COMPLETE:
+        /* Scan timed out without finding the advert; scan again, but do not
+         * do it forever. */
+        if (tx_stress_ctx->conn_handle != 0xffff ||
+            tx_stress_ctx->completed[11]) {
+            return 0;
+        }
+        if (tx_stress_retries++ >= TX_STRESS_RETRIES) {
+            MODLOG_DFLT(ERROR, "Test 11 advert not found; giving up\n");
+            tx_stress_on_test_finish(11);
+            return 0;
+        }
+        MODLOG_DFLT(WARN, "Test 11 advert not found; scanning again\n");
+        break;
 
     case BLE_GAP_EVENT_CONNECT:
         /* A new connection was established or a connection attempt failed. */
@@ -1200,6 +1310,7 @@ tx_stress_11_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
+        stress_conn_not_established(event, &tx_stress_ctx->con_stat[11]);
 
         if (tx_stress_ctx->con_stat[11].num >= MYNEWT_VAL(BLE_STRESS_REPEAT)) {
             tx_stress_on_test_finish(11);
@@ -1231,21 +1342,22 @@ tx_stress_12_gap_event(struct ble_gap_event *event, void *arg)
             MODLOG_DFLT(DEBUG, "Success to connect to device\n");
             tx_stress_ctx->conn_handle = event->connect.conn_handle;
         } else {
-            MODLOG_DFLT(ERROR, "Error: connection attempt failed; "
-                               "status=%d\n", event->connect.status);
+            tx_stress_on_connect_failed(tx_stress_12_gap_event, 12,
+                                        event->connect.status);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
-        /* Finish test after first disconnection */
-        tx_stress_on_test_finish(12);
+        tx_stress_on_disconnect(tx_stress_12_gap_event, 12,
+                                tx_stress_ctx->rcv_num);
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX:
         /* Received indication */
-        MODLOG_DFLT(INFO, "Received indication\n");
+        MODLOG_DFLT(DEBUG, "Received indication\n");
+        ++tx_stress_ctx->rcv_num;
         return 0;
 
     default:
@@ -1265,17 +1377,17 @@ tx_stress_13_gap_event(struct ble_gap_event *event, void *arg)
             MODLOG_DFLT(DEBUG, "Success to connect to device\n");
             tx_stress_ctx->conn_handle = event->connect.conn_handle;
         } else {
-            MODLOG_DFLT(ERROR, "Error: connection attempt failed; "
-                               "status=%d\n", event->connect.status);
-            assert(0);
+            tx_stress_on_connect_failed(tx_stress_13_gap_event, 13,
+                                        event->connect.status);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(DEBUG, "Disconnect; reason=%d \n",
                     event->disconnect.reason);
-        /* Finish test after disconnection */
-        tx_stress_on_test_finish(13);
+        tx_stress_ctx->s13_rcv_num = tx_stress_ctx->rcv_num;
+        tx_stress_on_disconnect(tx_stress_13_gap_event, 13,
+                                tx_stress_ctx->rcv_num);
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX:
@@ -1298,7 +1410,11 @@ tx_stress_14_subs_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
     bool *sub;
     int rc;
 
-    assert(error->status == 0);
+    if (error->status != 0) {
+        MODLOG_DFLT(ERROR, "CCCD write failed; status=%d\n", error->status);
+        ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        return 0;
+    }
 
     /* If the first subscription after finding cccd */
     if (arg == NULL) {
@@ -1328,6 +1444,14 @@ tx_stress_14_disc_cccd_fn(struct stress_gatt_search_ctx *search_ctx)
 {
     int rc;
     struct os_mbuf *om;
+
+    if (search_ctx->dsc_handle == 0) {
+        MODLOG_DFLT(ERROR, "CCCD not found\n");
+        ble_gap_terminate(tx_stress_ctx->conn_handle,
+                          BLE_ERR_REM_USER_CONN_TERM);
+        return;
+    }
+
     MODLOG_DFLT(INFO, "CCCD found\n");
 
     /* Enable notifications */
@@ -1364,9 +1488,8 @@ tx_stress_14_gap_event(struct ble_gap_event *event, void *arg)
                                    BLE_UUID16_DECLARE(0x2902),
                                    &tx_stress_14_disc_cccd_fn);
         } else {
-            MODLOG_DFLT(ERROR, "Error: connection attempt failed; "
-                               "status=%d\n", event->connect.status);
-            assert(0);
+            tx_stress_on_connect_failed(tx_stress_14_gap_event, 14,
+                                        event->connect.status);
         }
         return 0;
 
@@ -1380,8 +1503,8 @@ tx_stress_14_gap_event(struct ble_gap_event *event, void *arg)
         }
         MODLOG_DFLT(DEBUG, "Average notification time: %d\n",
                     tx_stress_ctx->s14_notif_time);
-        /* Finish test after first disconnection */
-        tx_stress_on_test_finish(14);
+        tx_stress_on_disconnect(tx_stress_14_gap_event, 14,
+                                tx_stress_ctx->rcv_num);
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX:
@@ -1435,6 +1558,13 @@ tx_stress_15_disc_chr_fn(struct stress_gatt_search_ctx *search_ctx)
     int rc;
     struct os_mbuf *om;
 
+    if (search_ctx->chr_start_handle == 0) {
+        MODLOG_DFLT(ERROR, "Characteristic not found\n");
+        ble_gap_terminate(tx_stress_ctx->conn_handle,
+                          BLE_ERR_REM_USER_CONN_TERM);
+        return;
+    }
+
     /* Send some data */
     MODLOG_DFLT(DEBUG, "Write to chr\n");
     om = ble_hs_mbuf_from_flat(test_6_pattern, 20);
@@ -1462,20 +1592,21 @@ tx_stress_15_gap_event(struct ble_gap_event *event, void *arg)
                                    BLE_UUID16_DECLARE(STRESS_GATT_WRITE_UUID),
                                    &tx_stress_15_disc_chr_fn);
         } else {
-            MODLOG_DFLT(ERROR, "Error: connection attempt failed; "
-                               "status=%d\n", event->connect.status);
-            assert(0);
+            tx_stress_on_connect_failed(tx_stress_15_gap_event, 15,
+                                        event->connect.status);
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
+        stress_conn_not_established(event, &tx_stress_ctx->con_stat[15]);
+
         /* Perform use case specified number of times */
         if (tx_stress_ctx->con_stat[15].num >= MYNEWT_VAL(BLE_STRESS_REPEAT)) {
             tx_stress_on_test_finish(15);
             return 0;
         }
         /* Reconnect */
-        tx_stress_simple_connect(tx_stress_15_gap_event, 15, NULL);
+        tx_stress_reconnect(tx_stress_15_gap_event, 15);
         return 0;
 
     default:
@@ -1493,9 +1624,12 @@ scan_for_test_gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_EXT_DISC:
         /* Check if caught advert contains known UUID128. The UUID128
-         * contains the ID of test use case to be executed. */
+         * contains the ID of test use case to be executed. A test performed
+         * already may be found again (RX device still advertises it); it
+         * is then run again and completes as soon as its counters allow,
+         * which lets RX device catch up when it missed something. */
         use_case = tx_stress_find_test(&event->ext_disc);
-        if (use_case > 0) {
+        if (use_case > 0 && use_case < STRESS_UUIDS_NUM) {
             rc = ble_gap_disc_cancel();
             tx_stress_ctx->dev_addr = event->ext_disc.addr;
 
@@ -1524,14 +1658,10 @@ scan_for_test_gap_event(struct ble_gap_event *event, void *arg)
 static void
 tx_stress_test_perform(int test_num)
 {
-    /* Perform every test only once */
-//    if (test_num <= 0 || tx_stress_ctx->completed[test_num] == true) {
-//        return;
-//    }
-
     tx_stress_ctx->cur_test_id = test_num;
     tx_stress_ctx->completed[test_num] = false;
     tx_stress_ctx->conn_handle = 0xffff;
+    tx_stress_retries = 0;
 
     MODLOG_DFLT(INFO, "Start test num %d - ", test_num);
 
@@ -1614,6 +1744,15 @@ tx_stress_test_perform(int test_num)
 static void
 tx_stress_read_command_cb(void)
 {
+    static bool started;
+
+    /* Only the first ENTER starts the tests; any later console input must
+     * not release the semaphore the tests are synchronized with. */
+    if (started) {
+        return;
+    }
+    started = true;
+
     MODLOG_DFLT(INFO, "Start testing\n");
     os_sem_release(&tx_stress_main_sem);
 }
@@ -1625,19 +1764,16 @@ tx_stress_main_task_fn(void *arg)
 
     tx_stress_ctx = &tx_stress_ctxD;
 
-    MODLOG_DFLT(INFO, "TX device\n");
-    MODLOG_DFLT(INFO, "Press ENTER to start: \n");
-    console_init(&tx_stress_read_command_cb);
-
-    /* Waite for pressing ENTER in console */
-    os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
-
     /* Init semaphore with 0 tokens. */
     rc = os_sem_init(&tx_stress_main_sem, 0);
     assert(rc == 0);
 
-    /* Start test 1 - Connect/Connect cancel */
-    //tx_stress_test_perform(1);
+    MODLOG_DFLT(INFO, "TX device\n");
+    MODLOG_DFLT(INFO, "Press ENTER to start: \n");
+    console_init(&tx_stress_read_command_cb);
+
+    /* Wait for pressing ENTER in console */
+    os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
 
     while (1) {
         MODLOG_DFLT(INFO, "Start scan for test\n");
@@ -1655,6 +1791,11 @@ tx_stress_main_task_fn(void *arg)
         /* Start test. */
         tx_stress_test_perform(tx_stress_use_case);
         tx_stress_use_case = -1;
+
+        /* Give RX device time to stop advertising the finished test and
+         * start the next one, so the finished test is not picked up again
+         * from a stale advert. */
+        os_time_delay(os_time_ms_to_ticks32(500));
     }
 
     /* Print tests results */
