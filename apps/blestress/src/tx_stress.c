@@ -55,9 +55,17 @@ static int tx_stress_retries;
 /* Semaphore used by test 1 to wait for the result of each connect/cancel. */
 static struct os_sem tx_stress_1_sem;
 
+/* Set when the current test was aborted on timeout; event handlers of the
+ * aborted test must not continue it. */
+static bool tx_stress_test_aborted;
+
 static void
 tx_stress_on_test_finish(int test_num)
 {
+    if (tx_stress_test_aborted) {
+        return;
+    }
+
     MODLOG_DFLT(INFO, "\nStress test %d completed\n",
                 test_num);
     ++completed_tests;
@@ -65,7 +73,7 @@ tx_stress_on_test_finish(int test_num)
     os_sem_release(&tx_stress_main_sem);
 }
 
-static void
+static int
 tx_stress_simple_scan(ble_gap_event_fn *cb, uint16_t duration)
 {
     uint8_t own_addr_type;
@@ -90,6 +98,8 @@ tx_stress_simple_scan(ble_gap_event_fn *cb, uint16_t duration)
         MODLOG_DFLT(WARN, "Error initiating GAP discovery procedure"
                            "; rc=%d\n", rc);
     }
+
+    return rc;
 }
 
 static int
@@ -136,6 +146,10 @@ tx_stress_on_connect_failed(ble_gap_event_fn *cb, int test_num, int status)
 {
     int rc;
 
+    if (tx_stress_test_aborted) {
+        return;
+    }
+
     MODLOG_DFLT(ERROR, "Error: connection attempt failed; test=%d; "
                        "status=%d; retry=%d\n",
                 test_num, status, tx_stress_retries);
@@ -157,6 +171,10 @@ tx_stress_reconnect(ble_gap_event_fn *cb, int test_num)
 {
     int rc;
 
+    if (tx_stress_test_aborted) {
+        return;
+    }
+
     rc = tx_stress_simple_connect(cb, test_num, NULL);
     if (rc != 0) {
         tx_stress_on_connect_failed(cb, test_num, rc);
@@ -171,6 +189,10 @@ tx_stress_reconnect(ble_gap_event_fn *cb, int test_num)
 static void
 tx_stress_on_disconnect(ble_gap_event_fn *cb, int test_num, int count)
 {
+    if (tx_stress_test_aborted) {
+        return;
+    }
+
     if (count < MYNEWT_VAL(BLE_STRESS_REPEAT) &&
         tx_stress_retries < TX_STRESS_RETRIES) {
         MODLOG_DFLT(WARN, "Disconnected before test %d finished (%d/%d); "
@@ -182,6 +204,45 @@ tx_stress_on_disconnect(ble_gap_event_fn *cb, int test_num, int count)
     }
 
     tx_stress_on_test_finish(test_num);
+}
+
+/*
+ * Called when a use case did not complete within BLE_STRESS_TEST_TIMEOUT.
+ * Cancels pending scan/connection, drops all connections and marks the test
+ * as done, so that the main task continues with the next test.
+ */
+static void
+tx_stress_abort_test(int test_num)
+{
+    MODLOG_DFLT(ERROR, "Stress test %d timed out; aborting\n", test_num);
+
+    tx_stress_test_aborted = true;
+    ble_gap_disc_cancel();
+    ble_gap_conn_cancel();
+    stress_terminate_all_conns();
+    tx_stress_ctx->completed[test_num] = true;
+
+    /* Drop tokens released by event handlers of the aborted test. */
+    os_sem_init(&tx_stress_main_sem, 0);
+}
+
+/*
+ * Waits until the current test releases the main task; aborts the test on
+ * timeout. Returns false if the test was aborted.
+ */
+static bool
+tx_stress_wait_test(int test_num)
+{
+    os_error_t err;
+
+    err = os_sem_pend(&tx_stress_main_sem,
+                      os_time_ms_to_ticks32(MYNEWT_VAL(BLE_STRESS_TEST_TIMEOUT) * 1000));
+    if (err == OS_TIMEOUT) {
+        tx_stress_abort_test(test_num);
+        return false;
+    }
+
+    return true;
 }
 
 static int
@@ -279,7 +340,9 @@ static void
 tx_stress_switch_test()
 {
     tx_stress_simple_scan(tx_stress_switcher_gap_event, 0);
-    os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
+    if (!tx_stress_wait_test(tx_stress_ctx->cur_test_id)) {
+        return;
+    }
 
     tx_stress_simple_connect(tx_stress_switcher_gap_event, 0, NULL);
 }
@@ -741,7 +804,9 @@ static void
 tx_stress_6_perform(void)
 {
     tx_stress_simple_scan(tx_stress_6_gap_event, 0);
-    os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
+    if (!tx_stress_wait_test(6)) {
+        return;
+    }
     tx_stress_switch_test();
 }
 
@@ -956,8 +1021,9 @@ tx_stress_9_gap_event(struct ble_gap_event *event, void *arg)
         /* Looking for next instance of test 9 advert. */
         test = tx_stress_find_test(&event->ext_disc);
         /* To avoid messing by rest of test 9 events in queue, check if handle
-         * filled */
-        if (test == 9 && tx_stress_ctx->conn_handle == 0xffff) {
+         * filled and test is still running. */
+        if (test == 9 && tx_stress_ctx->conn_handle == 0xffff &&
+            !tx_stress_ctx->completed[9]) {
             tx_stress_ctx->conn_handle = 0;
             ble_gap_disc_cancel();
             tx_stress_ctx->dev_addr = event->ext_disc.addr;
@@ -1043,7 +1109,9 @@ tx_stress_9_perform()
     /* Scan for next instance of the test. */
     tx_stress_simple_scan(tx_stress_9_gap_event, 2000);
 
-    os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
+    if (!tx_stress_wait_test(9)) {
+        return;
+    }
 
     /* On use case finishing terminate all handled connections and wait
      * until the last one is gone. */
@@ -1056,7 +1124,9 @@ tx_stress_9_perform()
             }
         }
 
-        os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
+        if (!tx_stress_wait_test(9)) {
+            return;
+        }
     }
 
     tx_stress_on_test_finish(9);
@@ -1270,8 +1340,9 @@ tx_stress_11_gap_event(struct ble_gap_event *event, void *arg)
         test = tx_stress_find_test(&event->ext_disc);
 
         /* To avoid messing by rest of test 11 events in queue, check if handle
-         * filled */
-        if (test == 11 && tx_stress_ctx->conn_handle == 0xffff) {
+         * filled and test is still running. */
+        if (test == 11 && tx_stress_ctx->conn_handle == 0xffff &&
+            !tx_stress_ctx->completed[11]) {
             tx_stress_ctx->conn_handle = 0;
             ble_gap_disc_cancel();
             tx_stress_ctx->dev_addr = event->ext_disc.addr;
@@ -1662,6 +1733,7 @@ tx_stress_test_perform(int test_num)
     tx_stress_ctx->completed[test_num] = false;
     tx_stress_ctx->conn_handle = 0xffff;
     tx_stress_retries = 0;
+    tx_stress_test_aborted = false;
 
     MODLOG_DFLT(INFO, "Start test num %d - ", test_num);
 
@@ -1736,7 +1808,9 @@ tx_stress_test_perform(int test_num)
 
     /* Wait for the test to finish. Then 1 token will be released
     * allowing to pass through semaphore. */
-    os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
+    if (!tx_stress_test_aborted) {
+        tx_stress_wait_test(test_num);
+    }
 
     stress_clear_ctx_reusable_var(tx_stress_ctx);
 }
@@ -1760,6 +1834,7 @@ tx_stress_read_command_cb(void)
 static void
 tx_stress_main_task_fn(void *arg)
 {
+    os_error_t err;
     int rc;
 
     tx_stress_ctx = &tx_stress_ctxD;
@@ -1775,15 +1850,30 @@ tx_stress_main_task_fn(void *arg)
     /* Wait for pressing ENTER in console */
     os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
 
+    /* Use case 1 does not involve RX device; perform it right away. */
+    tx_stress_test_perform(1);
+
     while (1) {
         MODLOG_DFLT(INFO, "Start scan for test\n");
 
         /* Scan for known UUID128 of one of the stress tests. */
-        tx_stress_simple_scan(scan_for_test_gap_event, 2000);
+        rc = tx_stress_simple_scan(scan_for_test_gap_event, 2000);
+        if (rc != 0) {
+            /* E.g. a late connection attempt of the previous test is still
+             * in progress; try again in a while. */
+            os_time_delay(os_time_ms_to_ticks32(1000));
+            continue;
+        }
 
         /* Wait for the scan to find the test. Then 1 token will be
-         * released allowing to pass through semaphore. */
-        os_sem_pend(&tx_stress_main_sem, OS_TIMEOUT_NEVER);
+         * released allowing to pass through semaphore. Scan lasts 20 s, so
+         * the wait is bounded as well in case its events got lost. */
+        err = os_sem_pend(&tx_stress_main_sem, os_time_ms_to_ticks32(30000));
+        if (err == OS_TIMEOUT) {
+            MODLOG_DFLT(ERROR, "Scan for test did not finish; retrying\n");
+            ble_gap_disc_cancel();
+            continue;
+        }
         if (tx_stress_ctx->scan_timeout) {
             break;
         }

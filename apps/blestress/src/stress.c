@@ -265,6 +265,40 @@ stress_conn_not_established(const struct ble_gap_event *event,
     return true;
 }
 
+/*
+ * Terminates all connections and waits (up to a few seconds) until they are
+ * gone, so that late events of an aborted test are handled before the next
+ * test starts.
+ */
+void
+stress_terminate_all_conns(void)
+{
+    int i;
+    int left;
+    int wait;
+
+    for (i = 0; i <= MYNEWT_VAL(BLE_MAX_CONNECTIONS); ++i) {
+        if (ble_gap_conn_find(i, NULL) == 0) {
+            ble_gap_terminate(i, BLE_ERR_REM_USER_CONN_TERM);
+        }
+    }
+
+    for (wait = 0; wait < 50; ++wait) {
+        left = 0;
+        for (i = 0; i <= MYNEWT_VAL(BLE_MAX_CONNECTIONS); ++i) {
+            if (ble_gap_conn_find(i, NULL) == 0) {
+                ++left;
+            }
+        }
+        if (left == 0) {
+            return;
+        }
+        os_time_delay(os_time_ms_to_ticks32(100));
+    }
+
+    MODLOG_DFLT(ERROR, "%d connections still up after abort\n", left);
+}
+
 static int
 stress_disc_dsc_fn(uint16_t conn_handle,
                    const struct ble_gatt_error *error,

@@ -45,9 +45,9 @@ Quick start
    turned on. Both devices print "Press ENTER to start:".
 
 5. Press ENTER on the RX device first and then on the TX device. Only the
-   first ENTER is taken into account. The RX device starts advertising the
-   first use case; the TX device scans for it (for up to 20 seconds) and
-   starts the tests.
+   first ENTER is taken into account. The TX device performs use case 1 on
+   its own, then scans (for up to 20 seconds) for the use case advertised
+   by the RX device and follows it.
 
 6. Wait until both devices print "All tests completed" followed by the
    results. With BLE_STRESS_REPEAT=50 the whole run takes a few minutes.
@@ -60,6 +60,13 @@ BLE_STRESS_TEST_ROLE  0 for the TX device, 1 for the RX device.
 BLE_STRESS_REPEAT     Number of times the action of each use case is
                       repeated (e.g. number of connections, parameter
                       updates, received adverts); default 50.
+
+BLE_STRESS_TEST_TIMEOUT
+                      Time in seconds after which a use case that did not
+                      complete on a device is aborted there (advertising
+                      stopped, connections dropped) and the next use case
+                      is started; default 180. Increase it for large
+                      BLE_STRESS_REPEAT values.
 
 BLE_STRESS_UUID_BASE  Last 13 bytes of the use case UUIDs. If more than one
                       pair of boards runs the tests within radio range,
@@ -95,8 +102,9 @@ No | Use case
  1 | Connect -> Connect Cancel
    | TX: initiates a connection to a random (non-existing) address and
    |     cancels it, first immediately, then after a random delay of up
-   |     to 1 s. Each part is repeated BLE_STRESS_REPEAT times.
-   | RX: nothing (only advertises the use case UUID).
+   |     to 1 s. Each part is repeated BLE_STRESS_REPEAT times. Performed
+   |     right after start, before the TX device scans for the RX device.
+   | RX: nothing.
  2 | Connect/Disconnect, legacy advertising
    | RX: legacy connectable advertising, restarted after each disconnect.
    | TX: connects and disconnects.
@@ -167,10 +175,12 @@ How it works
 
 The RX device advertises service data containing a UUID128 of the form
 C0 DE <use case> <BLE_STRESS_UUID_BASE>. The TX device scans for known
-UUIDs; when it finds one that was not performed yet, it remembers the
-advertiser address, adapts to the advertised use case and runs the test.
-When the TX device finds no new use case within 20 seconds, it assumes all
-tests are done and prints the results.
+UUIDs; when it finds one, it remembers the advertiser address, adapts to
+the advertised use case and runs the test. A use case found again after it
+was performed is run again and completes as soon as its counters allow,
+which lets the RX device catch up if it missed something. When the TX
+device finds no use case within 20 seconds, it assumes all tests are done
+and prints the results.
 
 Each device has a main task that starts the use cases one by one. The
 tests themselves are driven by GAP/L2CAP/GATT events. To synchronize the
@@ -179,7 +189,9 @@ the main task waits on the semaphore, and the event handler of the use case
 releases a token when the use case is completed. The RX device completes a
 use case when it reaches the required count and the TX device disconnects,
 the TX device when it reaches the required count or gives up (e.g. after
-several failed connection attempts).
+several failed connection attempts). A use case that does not complete
+within BLE_STRESS_TEST_TIMEOUT is aborted on that device and the next one
+is started, so neither device can get stuck forever.
 
 Use case 6 has no connection that could signal its end to the RX device, so
 the RX device also runs a legacy "switcher" advertising instance (instance
@@ -234,7 +246,7 @@ Known limitations
 
 - There is no pass/fail verdict; compare the counters with
   BLE_STRESS_REPEAT and look for ERROR log lines.
-- The RX device waits for the TX device to finish each use case. If the TX
-  device gives up a use case (e.g. the RX device is out of range), the RX
-  device may wait forever and both boards need to be reset.
+- If one device aborts a use case on timeout, the other one may still be
+  in it; they resynchronize at the next use case the RX device advertises,
+  so a run may lose a few use cases but completes.
 - State is not reset after a run; reset both boards to run the tests again.

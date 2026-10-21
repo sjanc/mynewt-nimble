@@ -366,6 +366,8 @@ int64_t stress_calc_bit_rate(int64_t us, int64_t bytes_num);
 bool stress_conn_not_established(const struct ble_gap_event *event,
                                  struct stress_con_stat *stat);
 
+void stress_terminate_all_conns(void);
+
 void stress_find_svc_handle(uint16_t conn_handle, const ble_uuid_t *srv_uuid,
                             stress_gatt_disc_end_fn *disc_end_fn);
 void stress_find_chr_handle(uint16_t conn_handle, const ble_uuid_t *srv_uuid,

@@ -722,14 +722,17 @@ rx_stress_9_gap_event(struct ble_gap_event *event, void *arg)
         MODLOG_DFLT(INFO, "Connections num: %d\n",
                     --rx_stress_ctx->con_stat[9].num);
 
-        if (rx_stress_ctx->con_stat[9].num != 0 &&
-            rx_stress_ctx->con_stat[9].num <
-            MYNEWT_VAL(BLE_MAX_CONNECTIONS) + 1) {
-            rx_stress_adv_start_with_rand_addr(TEST_INSTANCE);
-        } else {
-            /* When TX device has terminated all connections, stop advertising. */
+        /* TX device ends the test by terminating all connections. A link
+         * lost for any other reason (e.g. connection failed to be
+         * established) does not end the test, even if it was the only one;
+         * advertise a new instance then. */
+        if (rx_stress_ctx->con_stat[9].num == 0 &&
+            event->disconnect.reason == BLE_HS_HCI_ERR(BLE_ERR_REM_USER_CONN_TERM)) {
             ble_gap_ext_adv_stop(TEST_INSTANCE);
             rx_stress_on_test_finish(9);
+        } else if (rx_stress_ctx->con_stat[9].num <
+                   MYNEWT_VAL(BLE_MAX_CONNECTIONS) + 1) {
+            rx_stress_adv_start_with_rand_addr(TEST_INSTANCE);
         }
         return 0;
 
@@ -1444,9 +1447,29 @@ static struct rx_stress_adv_set rx_stress_adv_sets[] = {
     },
 };
 
+/*
+ * Called when a use case did not complete within BLE_STRESS_TEST_TIMEOUT
+ * (e.g. TX device gave it up or is out of range). Stops advertising and
+ * drops all connections, so that the next use case starts from a clean
+ * state. Tokens released meanwhile by event handlers of the aborted test
+ * are dropped when the semaphore is initialized for the next test.
+ */
+static void
+rx_stress_abort_test(int test_num)
+{
+    MODLOG_DFLT(ERROR, "Stress test %d timed out; aborting\n", test_num);
+
+    ble_gap_ext_adv_stop(TEST_INSTANCE);
+    ble_gap_ext_adv_stop(SWITCHER_INSTANCE);
+    stress_terminate_all_conns();
+    /* Event handlers of the aborted test may have restarted advertising. */
+    ble_gap_ext_adv_stop(TEST_INSTANCE);
+}
+
 static void
 rx_stress_start(int test_num)
 {
+    os_error_t err;
     int rc;
 
     /* Init semaphore with 0 tokens. */
@@ -1459,8 +1482,8 @@ rx_stress_start(int test_num)
     case 0:
         return;
     case 1:
+        /* Performed by TX device alone, right after its start. */
         MODLOG_DFLT(INFO, "Nothing to do\n");
-        rx_stress_simple_adv(&rx_stress_adv_sets[1]);
         return;
     case 2:
         MODLOG_DFLT(INFO, "Stress Connect/Disconnect legacy\n");
@@ -1533,7 +1556,11 @@ rx_stress_start(int test_num)
 
     /* Wait for the test to finish. Then 1 token will be released
     * allowing to pass through semaphore. */
-    os_sem_pend(&rx_stress_main_sem, OS_TIMEOUT_NEVER);
+    err = os_sem_pend(&rx_stress_main_sem,
+                      os_time_ms_to_ticks32(MYNEWT_VAL(BLE_STRESS_TEST_TIMEOUT) * 1000));
+    if (err == OS_TIMEOUT) {
+        rx_stress_abort_test(test_num);
+    }
 
     ble_gap_ext_adv_stop(SWITCHER_INSTANCE);
 

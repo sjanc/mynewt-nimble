@@ -27,6 +27,12 @@ syscfg.defs:
         description: Number of times to repeat each stress test use case
         value: 50
 
+    BLE_STRESS_TEST_TIMEOUT:
+        description: Time in seconds after which a use case that did not
+                     complete is aborted and the next one is started.
+                     Increase for large BLE_STRESS_REPEAT values.
+        value: 180
+
     BLE_STRESS_UUID_BASE:
         description: Part of the test UUID that is specific to the current
                      device couple.
