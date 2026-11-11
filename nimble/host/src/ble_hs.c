@@ -78,6 +78,9 @@ static struct ble_npl_callout ble_hs_timer;
 static struct ble_npl_eventq *ble_hs_evq;
 
 static struct ble_mqueue ble_hs_rx_q;
+#if MYNEWT_VAL(BLE_ISO_BROADCAST_SINK)
+static struct ble_mqueue ble_hs_iso_rx_q;
+#endif
 
 static struct ble_npl_mutex ble_hs_mutex;
 
@@ -307,6 +310,12 @@ ble_hs_clear_rx_queue(void)
     while ((om = ble_mqueue_get(&ble_hs_rx_q)) != NULL) {
         os_mbuf_free_chain(om);
     }
+
+#if MYNEWT_VAL(BLE_ISO_BROADCAST_SINK)
+    while ((om = ble_mqueue_get(&ble_hs_iso_rx_q)) != NULL) {
+        os_mbuf_free_chain(om);
+    }
+#endif
 }
 
 int
@@ -519,6 +528,18 @@ ble_hs_event_rx_data(struct ble_npl_event *ev)
 {
     ble_hs_process_rx_data_queue();
 }
+
+#if MYNEWT_VAL(BLE_ISO_BROADCAST_SINK)
+static void
+ble_hs_event_rx_iso_data(struct ble_npl_event *ev)
+{
+    struct os_mbuf *om;
+
+    while ((om = ble_mqueue_get(&ble_hs_iso_rx_q)) != NULL) {
+        ble_iso_rx_data(om, NULL);
+    }
+}
+#endif
 
 static void
 ble_hs_event_reset(struct ble_npl_event *ev)
@@ -778,6 +799,9 @@ ble_hs_init(void)
     ble_hs_stop_init();
 
     ble_mqueue_init(&ble_hs_rx_q, ble_hs_event_rx_data, NULL);
+#if MYNEWT_VAL(BLE_ISO_BROADCAST_SINK)
+    ble_mqueue_init(&ble_hs_iso_rx_q, ble_hs_event_rx_iso_data, NULL);
+#endif
 
     rc = stats_init_and_reg(
         STATS_HDR(ble_hs_stats), STATS_SIZE_INIT_PARMS(ble_hs_stats,
@@ -829,7 +853,19 @@ int
 ble_transport_to_hs_iso_impl(struct os_mbuf *om)
 {
 #if MYNEWT_VAL(BLE_ISO_BROADCAST_SINK)
-    return ble_iso_rx_data(om, NULL);
+    int rc;
+
+    /* Process ISO data in the host task, as the transport may call this from
+     * an interrupt or the controller task, and the application gets it from
+     * a callback
+     */
+    rc = ble_mqueue_put(&ble_hs_iso_rx_q, ble_hs_evq, om);
+    if (rc != 0) {
+        os_mbuf_free_chain(om);
+        return BLE_HS_EOS;
+    }
+
+    return 0;
 #else
     os_mbuf_free_chain(om);
 

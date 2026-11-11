@@ -103,6 +103,15 @@ hci_ipc_alloc(struct hci_ipc_sm *sm)
         sm->om = ble_transport_alloc_iso_from_hs();
 #else
         sm->om = ble_transport_alloc_iso_from_ll();
+        if (sm->om == NULL) {
+            /* ISO data to the host has no flow control, drop it if the host
+             * does not process it fast enough.
+             */
+            sm->discard = 1;
+            sm->rem_len = sm->hdr.length;
+            sm->buf_len = 0;
+            return;
+        }
 #endif
         break;
     default:
