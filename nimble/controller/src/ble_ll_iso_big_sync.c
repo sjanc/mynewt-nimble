@@ -374,7 +374,10 @@ big_sync_sched_set(struct ble_ll_iso_big *big, uint32_t offset_us)
     }
 
     ww_us += BLE_LL_JITTER_USECS;
-    BLE_LL_ASSERT(offset_us > ww_us);
+    if (offset_us <= ww_us) {
+        /* Receive window would open before the reference anchor */
+        return 1;
+    }
 
     /* Reset anchor base before anchor offset wraps-around.
      * This happens much earlier than the possible overflow in calculations.
@@ -596,7 +599,7 @@ biginfo_func(struct ble_ll_sync_sm *syncsm, uint8_t sca, uint32_t sync_ticks,
             goto fail;
         }
 
-        if (LL_TMR_LEQ(big->sch.start_time, ble_ll_tmr_get())) {
+        if (rc > 0 || LL_TMR_LEQ(big->sch.start_time, ble_ll_tmr_get())) {
             rc = -1;
         } else {
             rc = ble_ll_sched_iso_big_sync(&big->sch);
@@ -1128,6 +1131,11 @@ ble_ll_iso_big_sync_chan_map_ind(struct ble_ll_iso_big *big, struct os_mbuf *rxp
     struct ble_ll_big_ctrl_chan_map_ind ind;
 
     if (os_mbuf_copydata(rxpdu, 1, sizeof(ind), &ind) != 0) {
+        return;
+    }
+
+    if (ble_ll_utils_chan_map_used_get(ind.chan_map) < 2) {
+        STATS_INC(ble_ll_iso_big_sync_stats, rx_malformed_ctrl_pdus);
         return;
     }
 
