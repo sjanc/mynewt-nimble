@@ -1040,6 +1040,30 @@ ble_phy_rx_xcvr_setup(void)
                          RADIO_INTENSET_DISABLED_Msk);
 }
 
+static inline uint8_t
+ble_phy_get_cur_rx_phy_mode(void)
+{
+    uint8_t phy;
+
+    phy = g_ble_phy_data.phy_cur_phy_mode;
+
+#if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_CODED_PHY)
+    /*
+     * For Coded PHY mode can be set to either codings since actual coding is
+     * set in packet header. However, here we need actual coding of received
+     * packet as this determines pipeline delays so need to figure this out
+     * using CI field.
+     */
+    if ((phy == BLE_PHY_MODE_CODED_125KBPS) || (phy == BLE_PHY_MODE_CODED_500KBPS)) {
+        phy = NRF_RADIO->PDUSTAT & RADIO_PDUSTAT_CISTAT_Msk
+                  ? BLE_PHY_MODE_CODED_500KBPS
+                  : BLE_PHY_MODE_CODED_125KBPS;
+    }
+#endif
+
+    return phy;
+}
+
 static uint32_t
 ble_phy_transition_anchor_get(uint8_t tifs_anchor, uint8_t phy_state, uint8_t phy_mode)
 {
@@ -1082,8 +1106,9 @@ ble_transition_to_tx(uint8_t tifs_anchor, uint16_t tifs_usecs, uint8_t phy_state
     uint8_t phy_mode;
     bool is_late;
 
-    /* Store PHY on which we've just transmitted smth */
-    phy_mode = g_ble_phy_data.phy_cur_phy_mode;
+    /* PHY of the packet just transmitted or received */
+    phy_mode = (phy_state == BLE_PHY_STATE_RX) ? ble_phy_get_cur_rx_phy_mode()
+                                               : g_ble_phy_data.phy_cur_phy_mode;
 
 #if MYNEWT_VAL(BLE_LL_PHY)
     ble_phy_mode_apply(g_ble_phy_data.phy_tx_phy_mode);
@@ -1141,8 +1166,9 @@ ble_transition_to_rx(uint8_t tifs_anchor, uint16_t tifs_usecs,
 #endif
     uint8_t phy_mode;
 
-    /* Store PHY, on which we've just transmitted smth */
-    phy_mode = g_ble_phy_data.phy_cur_phy_mode;
+    /* PHY of the packet just transmitted or received */
+    phy_mode = (phy_state == BLE_PHY_STATE_RX) ? ble_phy_get_cur_rx_phy_mode()
+                                               : g_ble_phy_data.phy_cur_phy_mode;
 
 #if MYNEWT_VAL(BLE_LL_PHY)
     ble_phy_mode_apply(g_ble_phy_data.phy_rx_phy_mode);
@@ -1289,31 +1315,6 @@ ble_phy_tx_end_isr(void)
     }
 
     ble_phy_transition(transition, tifs_anchor, tifs_usecs, wfr_usecs, BLE_PHY_STATE_TX);
-}
-
-static inline uint8_t
-ble_phy_get_cur_rx_phy_mode(void)
-{
-    uint8_t phy;
-
-    phy = g_ble_phy_data.phy_cur_phy_mode;
-
-#if MYNEWT_VAL(BLE_LL_CFG_FEAT_LE_CODED_PHY)
-    /*
-     * For Coded PHY mode can be set to either codings since actual coding is
-     * set in packet header. However, here we need actual coding of received
-     * packet as this determines pipeline delays so need to figure this out
-     * using CI field.
-     */
-    if ((phy == BLE_PHY_MODE_CODED_125KBPS) ||
-                                    (phy == BLE_PHY_MODE_CODED_500KBPS)) {
-        phy = NRF_RADIO->PDUSTAT & RADIO_PDUSTAT_CISTAT_Msk ?
-                                   BLE_PHY_MODE_CODED_500KBPS :
-                                   BLE_PHY_MODE_CODED_125KBPS;
-    }
-#endif
-
-    return phy;
 }
 
 static void
