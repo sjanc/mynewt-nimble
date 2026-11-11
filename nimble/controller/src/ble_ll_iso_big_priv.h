@@ -152,7 +152,7 @@ struct ble_ll_iso_big {
     uint8_t mse;
 
     uint8_t sca;
-    uint16_t wfr_us;
+    uint32_t wfr_us;
 
     uint16_t tx_win_us;
 

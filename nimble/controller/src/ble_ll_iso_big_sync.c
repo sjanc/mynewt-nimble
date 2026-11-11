@@ -347,8 +347,8 @@ ctrl_subevent_offset_us(const struct ble_ll_iso_big *big)
 static int
 big_sync_sched_set(struct ble_ll_iso_big *big, uint32_t offset_us)
 {
-    uint16_t max_ww_us;
-    uint16_t ww_us;
+    uint32_t max_ww_us;
+    uint32_t ww_us;
     uint32_t end_us;
     uint8_t ctrl_len;
     uint8_t phy_mode;
