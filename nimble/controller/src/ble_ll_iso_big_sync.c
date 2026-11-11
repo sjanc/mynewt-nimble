@@ -692,7 +692,16 @@ ble_ll_iso_big_sync_event_done(struct ble_ll_iso_big *big)
             goto term;
         }
 
-        rc = ble_ll_sched_iso_big_sync(&big->sch);
+        /* Skip the events already started, e.g. if the LL task was delayed.
+         * Starting one late would receive at the wrong time on the channel
+         * of this event, and a PDU of another event received there would
+         * set the anchor with a wrong event counter.
+         */
+        if (rc > 0 || LL_TMR_LEQ(big->sch.start_time, ble_ll_tmr_get())) {
+            rc = -1;
+        } else {
+            rc = ble_ll_sched_iso_big_sync(&big->sch);
+        }
         if (rc >= 0) {
             break;
         }
