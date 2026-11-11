@@ -1064,13 +1064,6 @@ ble_ll_iso_big_sync_rx_isr_start(uint8_t pdu_type, struct ble_mbuf_hdr *rxhdr)
     big = g_ble_ll_iso_big_curr;
     BLE_LL_ASSERT(big);
 
-    big->anchor_offset = 0;
-    big->anchor_base_offset_us = 0;
-    big->anchor_base_ticks = rxhdr->beg_cputime;
-    big->anchor_base_rem_us = rxhdr->rem_usecs;
-    ble_ll_tmr_sub(&big->anchor_base_ticks, &big->anchor_base_rem_us,
-                   curr_subevent_offset_us(big));
-
     if (ble_ll_iso_big_term_pending(big)) {
         ble_ll_iso_big_sync_halt();
         return -1;
@@ -1250,6 +1243,8 @@ ble_ll_iso_big_sync_rx_isr_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
     return rc;
 }
 
+static bool ble_ll_iso_big_sync_is_lost(struct ble_ll_iso_big *big);
+
 void
 ble_ll_iso_big_sync_rx_isr_early_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
 {
@@ -1280,7 +1275,24 @@ ble_ll_iso_big_sync_rx_isr_early_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
         big->term_reason = BLE_ERR_CONN_TERM_MIC;
     }
 
+    /* The wait for response timer, which checks the sync timeout, does not
+     * expire if a PDU is received with a CRC error
+     */
+    if (!crc_ok && ble_ll_iso_big_sync_is_lost(big)) {
+        big->term_reason = BLE_ERR_CONN_SPVN_TMO;
+    }
+
     if (crc_ok) {
+        /* Only a PDU with a valid CRC is known to be from the BIG, so it
+         * alone sets the anchor and restarts the sync timeout.
+         */
+        big->anchor_offset = 0;
+        big->anchor_base_offset_us = 0;
+        big->anchor_base_ticks = rxhdr->beg_cputime;
+        big->anchor_base_rem_us = rxhdr->rem_usecs;
+        ble_ll_tmr_sub(&big->anchor_base_ticks, &big->anchor_base_rem_us,
+                       curr_subevent_offset_us(big));
+
         hdr_byte = rxbuf[0];
 
         /* Control Subevent Sequence Number */
