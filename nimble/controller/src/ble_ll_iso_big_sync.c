@@ -385,6 +385,7 @@ big_sync_sched_set(struct ble_ll_iso_big *big, uint32_t offset_us)
     if (big->anchor_offset == UINT16_MAX) {
         big->anchor_base_ticks = big->sch.start_time;
         big->anchor_base_rem_us = big->sch.remainder;
+        big->anchor_base_offset_us = 0;
         big->anchor_offset = 0;
     }
 
@@ -585,15 +586,19 @@ biginfo_func(struct ble_ll_sync_sm *syncsm, uint8_t sca, uint32_t sync_ticks,
     /* Transmit window */
     big->tx_win_us = offset_unit ? 300 : 30;
 
+    /* The anchor base stays at the BIGInfo until a BIG PDU is received, so
+     * that the window widening covers the drift since then.
+     */
     big->anchor_offset = 0;
     big->anchor_base_ticks = sync_ticks;
     big->anchor_base_rem_us = sync_rem_us;
+    big->anchor_base_offset_us = big_offset_us;
 
     big_counter = big->big_counter;
     while (true) {
         offset_us = big->anchor_offset * big->iso_interval * 1250;
 
-        rc = big_sync_sched_set(big, big_offset_us + offset_us);
+        rc = big_sync_sched_set(big, big->anchor_base_offset_us + offset_us);
         if (rc < 0) {
             status = BLE_ERR_UNSPECIFIED;
             goto fail;
@@ -609,10 +614,8 @@ biginfo_func(struct ble_ll_sync_sm *syncsm, uint8_t sca, uint32_t sync_ticks,
         }
 
         big->anchor_offset++;
+        big_counter++;
     }
-
-    ble_ll_tmr_add(&big->anchor_base_ticks, &big->anchor_base_rem_us,
-                   big_offset_us + offset_us);
 
     big->bis_counter += (big_counter - big->big_counter) * big->bn;
     big->big_counter = big_counter;
@@ -643,6 +646,7 @@ ble_ll_iso_big_sync_event_done(struct ble_ll_iso_big *big)
 
     while (true) {
         big_counter++;
+        big->anchor_offset++;
 
         if (big->control_active &&
             (int16_t)((uint16_t)big_counter - big->control_instant) >= 0) {
@@ -670,7 +674,8 @@ ble_ll_iso_big_sync_event_done(struct ble_ll_iso_big *big)
             big->chan_map_used = ble_ll_utils_chan_map_used_get(big->chan_map);
         }
 
-        offset_us = (big->anchor_offset + 1) * big->iso_interval * 1250;
+        offset_us = big->anchor_base_offset_us +
+                    big->anchor_offset * big->iso_interval * 1250;
 
         rc = big_sync_sched_set(big, offset_us);
         if (rc < 0) {
@@ -687,8 +692,6 @@ ble_ll_iso_big_sync_event_done(struct ble_ll_iso_big *big)
             ble_ll_iso_rx_event_start(&bis->rx, sdu_sync_ref_get(big));
             ble_ll_iso_rx_event_done(&bis->rx);
         }
-
-        big->anchor_offset++;
     }
 
     big->bis_counter += (big_counter - big->big_counter) * big->bn;
@@ -922,8 +925,6 @@ ble_ll_iso_big_sync_rmvd_from_sched(struct ble_ll_iso_big *big)
         ble_ll_iso_rx_event_start(&bis->rx, timestamp);
     }
 
-    big->anchor_offset++;
-
     ble_ll_iso_big_sync_event_done_to_ll(big);
 }
 
@@ -1054,6 +1055,7 @@ ble_ll_iso_big_sync_rx_isr_start(uint8_t pdu_type, struct ble_mbuf_hdr *rxhdr)
     BLE_LL_ASSERT(big);
 
     big->anchor_offset = 0;
+    big->anchor_base_offset_us = 0;
     big->anchor_base_ticks = rxhdr->beg_cputime;
     big->anchor_base_rem_us = rxhdr->rem_usecs;
     ble_ll_tmr_sub(&big->anchor_base_ticks, &big->anchor_base_rem_us,
@@ -1378,7 +1380,9 @@ ble_ll_iso_big_sync_is_lost(struct ble_ll_iso_big *big)
     ticks = big->anchor_base_ticks;
     rem_us = big->anchor_base_rem_us;
 
-    ble_ll_tmr_add(&ticks, &rem_us, BIG_SYNC_TIMEOUT_US(big->sync_timeout));
+    /* Until a BIG PDU is received, the timeout counts from the first event */
+    ble_ll_tmr_add(&ticks, &rem_us,
+                   big->anchor_base_offset_us + BIG_SYNC_TIMEOUT_US(big->sync_timeout));
 
     return LL_TMR_LEQ(ticks, ble_ll_tmr_get());
 }
@@ -1395,10 +1399,6 @@ ble_ll_iso_big_sync_wfr_timer_exp(void)
 
     if (big == NULL) {
         return;
-    }
-
-    if (big->subevents_rem == big->num_bis * big->nse) {
-        big->anchor_offset++;
     }
 
     if (ble_ll_iso_big_term_pending(big)) {
