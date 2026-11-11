@@ -59,6 +59,8 @@ static void
 hci_iso_sdu_send(uint16_t conn_handle, const struct os_mbuf *sdu,
                  uint32_t timestamp, uint16_t seq_num, bool valid)
 {
+    STAILQ_HEAD(, os_mbuf_pkthdr) frags = STAILQ_HEAD_INITIALIZER(frags);
+    struct os_mbuf_pkthdr *pkthdr;
     struct os_mbuf *om;
     struct ble_hci_iso_data *hci_iso_data;
     struct ble_hci_iso *hci_iso;
@@ -70,8 +72,15 @@ hci_iso_sdu_send(uint16_t conn_handle, const struct os_mbuf *sdu,
     uint8_t pb_flag;
     int rc;
 
+    /* All fragments are allocated before sending any, so that the SDU is
+     * dropped as a whole if the host does not take ISO data fast enough.
+     * The host sees the missing sequence number as a lost SDU.
+     */
     om = os_mbuf_get_pkthdr(&hci_iso_data_pkt_mbuf_pool, 0);
-    BLE_LL_ASSERT(om);
+    if (om == NULL) {
+        goto drop;
+    }
+    STAILQ_INSERT_TAIL(&frags, OS_MBUF_PKTHDR(om), omp_next);
 
     /* Prepare room for HCI ISO SDU packet header */
     hci_iso = os_mbuf_extend(om, sizeof(*hci_iso));
@@ -109,15 +118,12 @@ hci_iso_sdu_send(uint16_t conn_handle, const struct os_mbuf *sdu,
     hci_iso->length =
         htole16(HCI_ISO_TIMESTAMP_LEN + sizeof(*hci_iso_data) + iso_sdu_frag_len);
 
-    rc = ble_transport_to_hs_iso(om);
-    if (rc != 0) {
-        os_mbuf_free_chain(om);
-        BLE_LL_ASSERT(0);
-    }
-
     while (iso_sdu_offset < iso_sdu_len) {
         om = os_mbuf_get_pkthdr(&hci_iso_data_pkt_mbuf_pool, 0);
-        BLE_LL_ASSERT(om);
+        if (om == NULL) {
+            goto drop;
+        }
+        STAILQ_INSERT_TAIL(&frags, OS_MBUF_PKTHDR(om), omp_next);
 
         /* Prepare room for HCI ISO SDU packet header */
         hci_iso = os_mbuf_extend(om, sizeof(*hci_iso));
@@ -134,12 +140,23 @@ hci_iso_sdu_send(uint16_t conn_handle, const struct os_mbuf *sdu,
                                                : BLE_HCI_ISO_PB_LAST;
         hci_iso->handle = htole16(BLE_HCI_ISO_HANDLE(conn_handle, pb_flag, false));
         hci_iso->length = htole16(iso_sdu_frag_len);
+    }
 
-        rc = ble_transport_to_hs_iso(om);
+    while ((pkthdr = STAILQ_FIRST(&frags)) != NULL) {
+        STAILQ_REMOVE_HEAD(&frags, omp_next);
+
+        /* The transport takes the buffer, even on error */
+        rc = ble_transport_to_hs_iso(OS_MBUF_PKTHDR_TO_MBUF(pkthdr));
         if (rc != 0) {
-            os_mbuf_free_chain(om);
-            BLE_LL_ASSERT(0);
+            goto drop;
         }
+    }
+
+    return;
+drop:
+    while ((pkthdr = STAILQ_FIRST(&frags)) != NULL) {
+        STAILQ_REMOVE_HEAD(&frags, omp_next);
+        os_mbuf_free_chain(OS_MBUF_PKTHDR_TO_MBUF(pkthdr));
     }
 }
 
