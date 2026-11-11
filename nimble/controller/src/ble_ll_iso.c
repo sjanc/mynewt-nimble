@@ -443,6 +443,7 @@ ble_ll_iso_receive_test(const uint8_t *cmdbuf, uint8_t cmdlen, uint8_t *rspbuf,
     rx->test.missed_sdu_count = 0;
     rx->test.failed_sdu_count = 0;
     rx->data_path = &test_iso_data_path_cb;
+    ble_ll_isoal_demux_cb_set(&rx->demux, &isoal_demux_cb);
 
     rsp->conn_handle = cmd->conn_handle;
 
@@ -518,6 +519,7 @@ ble_ll_iso_end_test(const uint8_t *cmdbuf, uint8_t cmdlen, uint8_t *rspbuf,
     rx = conn->rx;
     if (rx != NULL && rx->data_path == &test_iso_data_path_cb) {
         rx->data_path = NULL;
+        ble_ll_isoal_demux_cb_set(&rx->demux, NULL);
         rsp->received_sdu_count = htole32(rx->test.received_sdu_count);
         rsp->missed_sdu_count = htole32(rx->test.missed_sdu_count);
         rsp->failed_sdu_count = htole32(rx->test.failed_sdu_count);
