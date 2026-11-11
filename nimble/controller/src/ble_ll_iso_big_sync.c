@@ -627,6 +627,7 @@ fail:
 }
 
 static uint32_t sdu_sync_ref_get(struct ble_ll_iso_big *big);
+static bool ble_ll_iso_big_sync_is_lost(struct ble_ll_iso_big *big);
 
 static void
 ble_ll_iso_big_sync_event_done(struct ble_ll_iso_big *big)
@@ -672,6 +673,14 @@ ble_ll_iso_big_sync_event_done(struct ble_ll_iso_big *big)
             big->chan_map_new_pending = false;
             memcpy(big->chan_map, big->chan_map_new, BLE_LL_CHAN_MAP_LEN);
             big->chan_map_used = ble_ll_utils_chan_map_used_get(big->chan_map);
+        }
+
+        /* Also covers the events removed from or not inserted in the
+         * scheduler, for which the wait for response timer does not run
+         */
+        if (ble_ll_iso_big_sync_is_lost(big)) {
+            big->term_reason = BLE_ERR_CONN_SPVN_TMO;
+            goto term;
         }
 
         offset_us = big->anchor_base_offset_us +
@@ -1242,8 +1251,6 @@ ble_ll_iso_big_sync_rx_isr_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
 
     return rc;
 }
-
-static bool ble_ll_iso_big_sync_is_lost(struct ble_ll_iso_big *big);
 
 void
 ble_ll_iso_big_sync_rx_isr_early_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
