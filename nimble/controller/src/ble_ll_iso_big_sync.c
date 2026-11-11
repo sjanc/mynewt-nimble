@@ -1183,7 +1183,6 @@ ble_ll_iso_big_sync_rx_isr_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
 {
     int rc = 0;
     struct ble_ll_iso_big *big;
-    uint8_t hdr_byte;
     uint8_t rx_pyld_len;
     struct os_mbuf *rxpdu = NULL;
     bool alloc_rxpdu;
@@ -1192,7 +1191,6 @@ ble_ll_iso_big_sync_rx_isr_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
     big = g_ble_ll_iso_big_curr;
     BLE_LL_ASSERT(big);
 
-    hdr_byte = rxbuf[0];
     rx_pyld_len = rxbuf[1];
 
     /**
@@ -1223,10 +1221,8 @@ ble_ll_iso_big_sync_rx_isr_end(uint8_t *rxbuf, struct ble_mbuf_hdr *rxhdr)
     if (rxpdu) {
         ble_phy_rxpdu_copy(rxbuf, rxpdu);
 
-        if (BLE_LL_BIS_LLID_IS_DATA(hdr_byte)) {
-            /* Copy the packet header */
-            memcpy(BLE_MBUF_HDR_PTR(rxpdu), rxhdr, sizeof(struct ble_mbuf_hdr));
-        }
+        /* Copy the packet header, used to dispatch data and control PDUs */
+        memcpy(BLE_MBUF_HDR_PTR(rxpdu), rxhdr, sizeof(struct ble_mbuf_hdr));
 
         ble_ll_rx_pdu_in(rxpdu);
     }
