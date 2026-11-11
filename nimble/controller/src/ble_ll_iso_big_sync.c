@@ -742,6 +742,16 @@ ble_ll_iso_big_sync_halt(void)
     }
 }
 
+uint32_t
+ble_ll_iso_big_sync_get_event_end_time(void)
+{
+    if (g_ble_ll_iso_big_curr) {
+        return g_ble_ll_iso_big_curr->sch.end_time;
+    }
+
+    return ble_ll_tmr_get();
+}
+
 static uint32_t
 curr_subevent_offset_us(const struct ble_ll_iso_big *big)
 {

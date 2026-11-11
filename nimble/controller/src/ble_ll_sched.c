@@ -336,23 +336,29 @@ done:
 
 /*
  * Determines if the schedule item overlaps the currently running schedule
- * item. We only care about connection schedule items
+ * item. We only care about connection and BIG sync schedule items
  */
 static int
 ble_ll_sched_overlaps_current(struct ble_ll_sched_item *sch)
 {
-    int rc = 0;
-#if MYNEWT_VAL(BLE_LL_ROLE_PERIPHERAL) || MYNEWT_VAL(BLE_LL_ROLE_CENTRAL)
-    uint32_t ce_end_time;
+    uint32_t end_time;
 
-    if (ble_ll_state_get() == BLE_LL_STATE_CONNECTION) {
-        ce_end_time = ble_ll_conn_get_ce_end_time();
-        if (LL_TMR_GT(ce_end_time, sch->start_time)) {
-            rc = 1;
-        }
-    }
+    switch (ble_ll_state_get()) {
+#if MYNEWT_VAL(BLE_LL_ROLE_PERIPHERAL) || MYNEWT_VAL(BLE_LL_ROLE_CENTRAL)
+    case BLE_LL_STATE_CONNECTION:
+        end_time = ble_ll_conn_get_ce_end_time();
+        break;
 #endif
-    return rc;
+#if MYNEWT_VAL(BLE_LL_ISO_BROADCAST_SYNC)
+    case BLE_LL_STATE_BIG_SYNC:
+        end_time = ble_ll_iso_big_sync_get_event_end_time();
+        break;
+#endif
+    default:
+        return 0;
+    }
+
+    return LL_TMR_GT(end_time, sch->start_time);
 }
 
 int
@@ -684,6 +690,11 @@ ble_ll_sched_sync_overlaps_current(struct ble_ll_sched_item *sch)
     case BLE_LL_STATE_SYNC:
         end_time = ble_ll_sync_get_event_end_time();
         break;
+#if MYNEWT_VAL(BLE_LL_ISO_BROADCAST_SYNC)
+    case BLE_LL_STATE_BIG_SYNC:
+        end_time = ble_ll_iso_big_sync_get_event_end_time();
+        break;
+#endif
     default:
         return 0;
     }
@@ -852,6 +863,11 @@ ble_ll_sched_adv_resched_pdu(struct ble_ll_sched_item *sch)
 #endif
 #if MYNEWT_VAL(BLE_LL_ISO_BROADCASTER)
     case BLE_LL_STATE_BIG:
+        OS_EXIT_CRITICAL(sr);
+        return -1;
+#endif
+#if MYNEWT_VAL(BLE_LL_ISO_BROADCAST_SYNC)
+    case BLE_LL_STATE_BIG_SYNC:
         OS_EXIT_CRITICAL(sr);
         return -1;
 #endif
